@@ -1,0 +1,6 @@
+{
+  "name": "Ping Pong 3D",
+  "description": "3D perspective table tennis game with realistic ball spin, dynamic lighting, particles, sound synthesizer, and glassmorphism HUD.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
