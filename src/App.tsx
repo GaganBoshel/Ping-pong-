@@ -1500,7 +1500,13 @@ export default function App() {
               <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-amber-400 border-2 border-slate-900 animate-pulse" title="Serving" />
             )}
           </div>
-          <div id="scoreboard-player-score-box" className="flex flex-col">
+          <div
+            id="scoreboard-player-score-box"
+            key={`player-score-box-${playerScore}`}
+            className={`flex flex-col scoreboard-player-bloom ${
+              playerScore > 0 ? 'animate-score-box-bloom' : ''
+            }`}
+          >
             <div className="flex items-center gap-1.5">
               <span className="text-xs uppercase tracking-wider text-slate-300 font-semibold">Player</span>
               <span className={`w-2 h-2 rounded-full shadow-sm ${PADDLE_COLOR_CONFIG[playerPaddleColor].dotColorClass}`} />

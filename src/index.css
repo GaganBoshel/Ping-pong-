@@ -81,3 +81,27 @@
   animation: container-shake 0.48s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
 }
 
+@keyframes score-box-bloom {
+  0% {
+    filter: drop-shadow(0 0 5px rgba(251, 191, 36, 0.2));
+  }
+  32% {
+    filter: drop-shadow(0 0 18px rgba(251, 191, 36, 0.95)) drop-shadow(0 0 32px rgba(245, 158, 11, 0.65)) drop-shadow(0 0 45px rgba(217, 119, 6, 0.4)) brightness(1.25);
+  }
+  65% {
+    filter: drop-shadow(0 0 12px rgba(251, 191, 36, 0.5)) drop-shadow(0 0 20px rgba(245, 158, 11, 0.3)) brightness(1.1);
+  }
+  100% {
+    filter: drop-shadow(0 0 5px rgba(251, 191, 36, 0.2));
+  }
+}
+
+.scoreboard-player-bloom {
+  filter: drop-shadow(0 0 5px rgba(251, 191, 36, 0.2));
+  transition: filter 0.3s ease;
+}
+
+.animate-score-box-bloom {
+  animation: score-box-bloom 0.55s cubic-bezier(0.175, 0.885, 0.32, 1.275) both;
+}
+
