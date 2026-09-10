@@ -348,6 +348,7 @@ export const createInitialBall = (servedBy: 'player' | 'cpu' = 'player'): BallSt
 };
 
 export default function App() {
+  const totalSmashes = 0;
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Default to vibrant Jungle Emerald paddle color as seen in the reference image
