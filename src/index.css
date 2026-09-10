@@ -105,3 +105,63 @@
   animation: score-box-bloom 0.55s cubic-bezier(0.175, 0.885, 0.32, 1.275) both;
 }
 
+/* Distinct Gold Flash Pulse across player scoreboard container on match victory */
+@keyframes gold-match-win-flash {
+  0% {
+    background: rgba(234, 179, 8, 0.2);
+    border-color: rgba(250, 204, 21, 0.5);
+    box-shadow: 0 0 10px 2px rgba(234, 179, 8, 0.4);
+    transform: scale(1);
+  }
+  20% {
+    background: linear-gradient(135deg, rgba(254, 240, 138, 0.95), rgba(245, 158, 11, 0.95), rgba(202, 138, 4, 0.95));
+    border-color: #ffffff;
+    box-shadow: 0 0 35px 10px rgba(250, 204, 21, 0.95), 0 0 65px 20px rgba(234, 179, 8, 0.65), inset 0 0 20px rgba(255, 255, 255, 0.9);
+    transform: scale(1.12);
+  }
+  45% {
+    background: linear-gradient(135deg, rgba(245, 158, 11, 0.65), rgba(202, 138, 4, 0.75));
+    border-color: rgba(253, 224, 71, 0.9);
+    box-shadow: 0 0 22px 5px rgba(245, 158, 11, 0.7), inset 0 0 10px rgba(254, 240, 138, 0.5);
+    transform: scale(1.04);
+  }
+  70% {
+    background: linear-gradient(135deg, rgba(254, 240, 138, 0.92), rgba(234, 179, 8, 0.96), rgba(180, 83, 9, 0.92));
+    border-color: #ffffff;
+    box-shadow: 0 0 40px 12px rgba(250, 204, 21, 0.95), 0 0 75px 25px rgba(217, 119, 6, 0.7), inset 0 0 22px rgba(255, 255, 255, 0.95);
+    transform: scale(1.1);
+  }
+  100% {
+    background: linear-gradient(135deg, rgba(245, 158, 11, 0.5), rgba(202, 138, 4, 0.55));
+    border-color: rgba(250, 204, 21, 0.85);
+    box-shadow: 0 0 25px 7px rgba(234, 179, 8, 0.68), inset 0 0 12px rgba(254, 240, 138, 0.4);
+    transform: scale(1.05);
+  }
+}
+
+.animate-gold-match-win-flash {
+  animation: gold-match-win-flash 1.6s cubic-bezier(0.22, 1, 0.36, 1) infinite alternate;
+}
+
+@keyframes gold-wave-sweep {
+  0% {
+    transform: translateX(-130%) skewX(-25deg);
+    opacity: 0;
+  }
+  25% {
+    opacity: 1;
+  }
+  75% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(230%) skewX(-25deg);
+    opacity: 0;
+  }
+}
+
+.animate-gold-wave-sweep {
+  animation: gold-wave-sweep 1.3s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+

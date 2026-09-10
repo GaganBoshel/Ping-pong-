@@ -5,6 +5,7 @@
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Volume2, VolumeX, RotateCcw, Trophy, Flame, Play, Sparkles, Shield, Award, Palette } from 'lucide-react';
+import jungleCourtBg from './assets/images/jungle_court_bg_1789000821397.jpg';
 
 // ==========================================
 // PROCEDURAL SOUND SYNTHESIZER (Web Audio API)
@@ -304,10 +305,10 @@ export const PADDLE_COLOR_CONFIG: Record<PaddleColor, {
     sparkColors: ['#ffffff', '#93c5fd', '#3b82f6', '#1d4ed8'],
   },
   green: {
-    name: 'Emerald Green',
-    light: '#4ade80',
-    mid: '#16a34a',
-    dark: '#14532d',
+    name: 'Jungle Emerald',
+    light: '#86efac',
+    mid: '#22c55e',
+    dark: '#15803d',
     dotColorClass: 'bg-emerald-400 shadow-emerald-400/50',
     avatarClass: 'bg-gradient-to-br from-emerald-500 to-teal-700 shadow-emerald-900/40 text-white',
     sparkColors: ['#ffffff', '#86efac', '#22c55e', '#15803d'],
@@ -328,11 +329,29 @@ export const getRandomPaddleColor = (exclude?: PaddleColor): PaddleColor => {
   return choices[Math.floor(Math.random() * choices.length)];
 };
 
+export const createInitialBall = (servedBy: 'player' | 'cpu' = 'player'): BallState => {
+  const startDepth = servedBy === 'player' ? 0.92 : 0.06;
+  const dir = servedBy === 'player' ? -1 : 1;
+  return {
+    depth: startDepth,
+    lateral: 0,
+    vDepth: dir * 0.011,
+    vLateral: 0,
+    z: 26,
+    vz: 3.6,
+    spinLateral: 0,
+    rotation: 0,
+    tableBounces: 0,
+    lastHitter: servedBy,
+    smash: false,
+  };
+};
+
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  // Randomly select paddle color (blue, green, purple) for the match
-  const [playerPaddleColor, setPlayerPaddleColor] = useState<PaddleColor>(() => getRandomPaddleColor());
+  // Default to vibrant Jungle Emerald paddle color as seen in the reference image
+  const [playerPaddleColor, setPlayerPaddleColor] = useState<PaddleColor>('green');
 
   // Game UI State
   const [playerScore, setPlayerScore] = useState(0);
@@ -341,16 +360,17 @@ export default function App() {
   const [server, setServer] = useState<'player' | 'cpu'>('player');
   const [rallyCount, setRallyCount] = useState(0);
   const [bestRally, setBestRally] = useState(0);
-  const [totalSmashes, setTotalSmashes] = useState(0);
+  const [totalFastHits, setTotalFastHits] = useState(0);
   const [muted, setMuted] = useState(false);
   const [difficulty, setDifficulty] = useState<Difficulty>('pro');
   const [bannerMessage, setBannerMessage] = useState<{ text: string; sub: string } | null>({
     text: 'Ping Pong 3D',
-    sub: 'Click or Tap to Serve',
+    sub: 'Click or Tap to Serve (Move bat for Fast Serve ⚡)',
   });
   const [gameOver, setGameOver] = useState<'player' | 'cpu' | null>(null);
   const [screenShakeActive, setScreenShakeActive] = useState(false);
   const shakeTimerRef = useRef<number | null>(null);
+  const cpuServeTimerRef = useRef<number | null>(null);
 
   // Game logic refs to avoid frame tearing
   const gameStateRef = useRef({
@@ -361,7 +381,7 @@ export default function App() {
     server: 'player' as 'player' | 'cpu',
     rallyCount: 0,
     bestRally: 0,
-    totalSmashes: 0,
+    totalFastHits: 0,
     difficulty: 'pro' as Difficulty,
     gameOver: null as 'player' | 'cpu' | null,
 
@@ -375,12 +395,19 @@ export default function App() {
     aiLateral: 0,
     aiVx: 0,
 
+    // Fast strike & stroke speed tracking
+    recentStrikeSpeed: 0,
+    strokeDistance: 0,
+    lastPointerX: 0,
+    lastPointerY: 0,
+    lastPointerTime: 0,
+
     // Tilt angles for 3D realism
     paddleTilt: 0,
     aiTilt: 0,
 
-    // Ball
-    ball: null as BallState | null,
+    // Ball initialized immediately so user doesn't have to restart match
+    ball: createInitialBall('player') as BallState | null,
     trail: [] as { x: number; y: number; r: number; alpha: number; smash: boolean }[],
 
     // FX & Camera Shake
@@ -406,7 +433,7 @@ export default function App() {
 
   const tableEdgeAt = useCallback((depth: number) => {
     const y = tableGeom.topY + (tableGeom.bottomY - tableGeom.topY) * depth;
-    const halfW = tableGeom.topHalfW + (tableGeom.bottomHalfW - tableGeom.topHalfW) * depth;
+    const halfW = Math.max(20, tableGeom.topHalfW + (tableGeom.bottomHalfW - tableGeom.topHalfW) * depth);
     return { y, halfW };
   }, [tableGeom.bottomHalfW, tableGeom.bottomY, tableGeom.topHalfW, tableGeom.topY]);
 
@@ -484,8 +511,51 @@ export default function App() {
     };
   }, []);
 
+  // CPU Serve execution: both player and CPU can perform fast serves
+  const triggerCpuServe = useCallback(() => {
+    if (cpuServeTimerRef.current) {
+      window.clearTimeout(cpuServeTimerRef.current);
+    }
+    cpuServeTimerRef.current = window.setTimeout(() => {
+      const gs = gameStateRef.current;
+      if (gs.serving && gs.server === 'cpu' && !gs.gameOver && gs.ball) {
+        gs.serving = false;
+        setServing(false);
+        setBannerMessage(null);
+
+        // Fast serve capability for CPU (~45% chance)
+        const isCpuFastServe = Math.random() < 0.45;
+        const cpuServeSpeed = isCpuFastServe
+          ? 0.023 + Math.random() * 0.005 // 0.023 - 0.028 fast serve
+          : 0.011 + Math.random() * 0.002; // standard serve
+
+        gs.ball.vDepth = cpuServeSpeed;
+        gs.ball.vLateral = (Math.random() - 0.5) * (isCpuFastServe ? 0.012 : 0.006);
+        gs.ball.vz = isCpuFastServe ? 2.5 : 3.6;
+        gs.ball.tableBounces = 0;
+        gs.ball.lastHitter = 'cpu';
+        gs.ball.smash = isCpuFastServe;
+
+        sound.paddleHit(isCpuFastServe ? 1.6 : 1.0);
+        const pos = worldToScreen(gs.ball.depth, gs.ball.lateral);
+        spawnHitSparks(pos.x, pos.y - gs.ball.z, isCpuFastServe ? 24 : 14, 'warm');
+
+        if (isCpuFastServe) {
+          sound.whoosh();
+          addCameraShake(3);
+          addFloatText('CPU FAST SERVE! ⚡', pos.x, pos.y - gs.ball.z - 25, '#fb923c');
+        }
+      }
+      cpuServeTimerRef.current = null;
+    }, 1100);
+  }, [addCameraShake, addFloatText, spawnHitSparks, worldToScreen]);
+
   // Reset for next serve
   const resetServe = useCallback((nextServer: 'player' | 'cpu', msg?: string, subMsg = 'Click or Tap to Serve') => {
+    if (cpuServeTimerRef.current) {
+      window.clearTimeout(cpuServeTimerRef.current);
+      cpuServeTimerRef.current = null;
+    }
     const gs = gameStateRef.current;
     gs.serving = true;
     gs.server = nextServer;
@@ -498,7 +568,12 @@ export default function App() {
     if (msg) {
       setBannerMessage({ text: msg, sub: subMsg });
     }
-  }, [createBall]);
+
+    // Auto-launch CPU serve if CPU is serving
+    if (nextServer === 'cpu') {
+      triggerCpuServe();
+    }
+  }, [createBall, triggerCpuServe]);
 
   // Scoring logic with Match Point & Deuce Detection
   const handlePointScored = useCallback((winner: 'player' | 'cpu') => {
@@ -567,26 +642,13 @@ export default function App() {
       banner = `DEUCE! (${newP} - ${newC})`;
     }
 
-    resetServe(nextServer, banner, nextServer === 'player' ? 'Your Serve — Click / Tap' : 'CPU Serve Incoming...');
-
-    // If CPU serves, auto-launch after brief delay
-    if (nextServer === 'cpu') {
-      setTimeout(() => {
-        if (gameStateRef.current.serving && gameStateRef.current.server === 'cpu' && !gameStateRef.current.gameOver) {
-          gameStateRef.current.serving = false;
-          setServing(false);
-          setBannerMessage(null);
-          sound.paddleHit(1.0);
-          if (gameStateRef.current.ball) {
-            gameStateRef.current.ball.vDepth = 0.0105;
-            gameStateRef.current.ball.vLateral = (Math.random() - 0.5) * 0.006;
-            gameStateRef.current.ball.vz = 3.6;
-            gameStateRef.current.ball.tableBounces = 0;
-            gameStateRef.current.ball.lastHitter = 'cpu';
-          }
-        }
-      }, 1100);
-    }
+    resetServe(
+      nextServer,
+      banner,
+      nextServer === 'player'
+        ? 'Your Serve — Click / Tap (Move bat for Fast Serve ⚡)'
+        : 'CPU Serve Incoming...'
+    );
   }, [addCameraShake, resetServe]);
 
   // Restart complete match
@@ -596,13 +658,17 @@ export default function App() {
     gs.cpuScore = 0;
     gs.rallyCount = 0;
     gs.bestRally = 0;
-    gs.totalSmashes = 0;
+    gs.totalFastHits = 0;
     gs.gameOver = null;
     gs.serveCounter = 0;
 
     if (shakeTimerRef.current) {
       window.clearTimeout(shakeTimerRef.current);
       shakeTimerRef.current = null;
+    }
+    if (cpuServeTimerRef.current) {
+      window.clearTimeout(cpuServeTimerRef.current);
+      cpuServeTimerRef.current = null;
     }
     setScreenShakeActive(false);
 
@@ -615,10 +681,10 @@ export default function App() {
     setCpuScore(0);
     setRallyCount(0);
     setBestRally(0);
-    setTotalSmashes(0);
+    setTotalFastHits(0);
     setGameOver(null);
 
-    resetServe('player', 'Ping Pong 3D', 'Click or Tap to Serve');
+    resetServe('player', 'Ping Pong 3D', 'Click or Tap to Serve (Move bat for Fast Serve ⚡)');
   }, [resetServe]);
 
   // Pointer & Touch handlers
@@ -650,6 +716,21 @@ export default function App() {
     gs.prevPaddleLateral = gs.paddleLateral;
     gs.paddleLateral = lateral;
     gs.paddleVx = (gs.paddleLateral - gs.prevPaddleLateral);
+
+    // Track stroke velocity and stroke travel distance
+    const latSpeed = Math.abs(gs.paddleVx);
+    const depthSpeed = Math.abs(gs.paddleVy || 0);
+    // Forward drive bonus: pushing paddle forward towards net (paddleVy < 0) adds strong forward momentum
+    const forwardDriveBonus = (gs.paddleVy || 0) < 0 ? Math.abs(gs.paddleVy || 0) * 2.2 : 0;
+    const instantStrike = Math.hypot(latSpeed * 1.25, (depthSpeed + forwardDriveBonus) * 1.5);
+    gs.recentStrikeSpeed = Math.max((gs.recentStrikeSpeed || 0) * 0.85, instantStrike);
+
+    // Track stroke travel distance (wind-up & swing sweep distance)
+    const moveDist = Math.hypot(
+      gs.paddleVx * 1.6,
+      (gs.paddleVy || 0) * 2.8
+    );
+    gs.strokeDistance = Math.min(2.5, (gs.strokeDistance || 0) + moveDist);
   }, [tableEdgeAt, tableGeom.bottomY, tableGeom.cx, tableGeom.topY]);
 
   const handlePointerDown = useCallback(() => {
@@ -657,24 +738,62 @@ export default function App() {
     const gs = gameStateRef.current;
     if (gs.gameOver) return;
 
-    if (gs.serving) {
+    if (gs.serving || !gs.ball) {
+      if (!gs.ball) {
+        gs.ball = createBall(gs.server || 'player');
+      }
       gs.serving = false;
       setServing(false);
       setBannerMessage(null);
       sound.paddleHit(1.2);
 
-      // Impart gentle serve direction, speed, and smooth arc clearing the net
-      if (gs.ball) {
-        gs.ball.vDepth = -0.011;
-        gs.ball.vLateral = gs.paddleLateral * -0.005;
-        gs.ball.vz = 3.6;
-        gs.ball.tableBounces = 0;
-        gs.ball.lastHitter = 'player';
-        const pos = worldToScreen(gs.ball.depth, gs.ball.lateral);
-        spawnHitSparks(pos.x, pos.y - gs.ball.z, 14, gs.playerPaddleColor);
+      // Fast serve detection based on current paddle stroke velocity & swing distance
+      const strikeSpeed = Math.max(
+        Math.hypot(gs.paddleVx, gs.paddleVy || 0),
+        gs.recentStrikeSpeed || 0
+      );
+      const strokeDist = gs.strokeDistance || 0;
+      const forwardDrive = Math.max(0, -(gs.paddleVy || 0));
+      const isFastServe = strikeSpeed > 0.009 || strokeDist > 0.15 || forwardDrive > 0.003 || gs.paddleDepth > 0.96;
+      const serveSpeed = isFastServe
+        ? Math.max(0.024, Math.min(0.032, 0.022 + strikeSpeed * 0.38 + strokeDist * 0.015))
+        : 0.0125;
+
+      gs.ball.vDepth = -serveSpeed;
+      gs.ball.vLateral = gs.paddleLateral * -0.005 + (gs.paddleVx || 0) * 0.35;
+      gs.ball.vz = isFastServe ? 2.5 : 3.6;
+      gs.ball.tableBounces = 0;
+      gs.ball.lastHitter = 'player';
+      gs.ball.smash = isFastServe;
+
+      sound.paddleHit(isFastServe ? 1.6 : 1.2);
+      const pos = worldToScreen(gs.ball.depth, gs.ball.lateral);
+      spawnHitSparks(pos.x, pos.y - gs.ball.z, isFastServe ? 26 : 14, gs.playerPaddleColor);
+      if (isFastServe) {
+        sound.whoosh();
+        addCameraShake(3);
+        addFloatText('FAST SERVE! ⚡', pos.x, pos.y - gs.ball.z - 25, '#38bdf8');
+        gs.totalFastHits = (gs.totalFastHits || 0) + 1;
+        setTotalFastHits(gs.totalFastHits);
       }
     }
-  }, [spawnHitSparks, worldToScreen]);
+  }, [addCameraShake, addFloatText, createBall, spawnHitSparks, worldToScreen]);
+
+  // Initial mount auto-serve so match can start right away without clicking Restart Match
+  useEffect(() => {
+    resetServe('player', 'Ping Pong 3D', 'Click or Tap to Serve (Move bat for Fast Serve ⚡)');
+  }, [resetServe]);
+
+  // Spacebar and Enter to serve or hit
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'Space' || e.code === 'Enter') {
+        handlePointerDown();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handlePointerDown]);
 
   // Mute toggle
   const toggleMute = useCallback(() => {
@@ -748,7 +867,10 @@ export default function App() {
 
       // Update paddle tilt with smooth spring interpolation
       gs.paddleTilt += (gs.paddleVx * 15 - gs.paddleTilt) * 0.2;
-      gs.paddleVx *= 0.75;
+      gs.paddleVx *= 0.80;
+      gs.paddleVy = (gs.paddleVy || 0) * 0.80;
+      gs.recentStrikeSpeed = (gs.recentStrikeSpeed || 0) * 0.90;
+      gs.strokeDistance = (gs.strokeDistance || 0) * 0.88;
 
       // Update camera shake decay
       if (gs.shakeMag > 0.05) {
@@ -853,16 +975,17 @@ export default function App() {
         }
       }
 
-      // Motion Trail Recording
+      // Motion Trail Recording with dynamic length based on speed
       const curScr = worldToScreen(ball.depth, ball.lateral);
+      const isUltraFast = ball.smash || Math.abs(ball.vDepth) > 0.022;
       gs.trail.unshift({
         x: curScr.x,
         y: curScr.y - ball.z,
-        r: (9 * (0.45 + ball.depth * 0.85)),
-        alpha: ball.smash ? 0.85 : 0.45,
-        smash: ball.smash,
+        r: Math.max(2, 9 * (0.45 + ball.depth * 0.85)),
+        alpha: isUltraFast ? 0.9 : 0.45,
+        smash: isUltraFast,
       });
-      if (gs.trail.length > (ball.smash ? 14 : 7)) {
+      if (gs.trail.length > (isUltraFast ? 18 : 8)) {
         gs.trail.pop();
       }
 
@@ -876,34 +999,99 @@ export default function App() {
         if ((depthDiff <= hitDepthThreshold || crossedPaddle) && ball.depth <= 1.07) {
           const offset = ball.lateral - gs.paddleLateral;
           if (Math.abs(offset) < paddleHalfW + 0.09 && ball.z < 85) {
-            // Successful Player Return with relaxed, comfortable ball speed
-            const strikeSpeed = Math.hypot(gs.paddleVx, gs.paddleVy || 0);
-            const isSmash = strikeSpeed > 0.028 || ball.z > 38;
+            // Compute strike hardness and speed
+            const strikeSpeed = Math.max(
+              Math.hypot(gs.paddleVx, gs.paddleVy || 0),
+              gs.recentStrikeSpeed || 0
+            );
+            // Forward drive bonus: pushing paddle forward towards net adds direct offensive force
+            const forwardDrive = Math.max(0, -(gs.paddleVy || 0) * 2.2);
+            const totalStrikeForce = strikeSpeed + forwardDrive;
 
-            // Compute return depth speed (gentler pace)
-            let speedFactor = 1.02;
-            if (isSmash) {
-              speedFactor = 1.22;
-              ball.smash = true;
-              gs.totalSmashes++;
-              setTotalSmashes(gs.totalSmashes);
-              sound.whoosh();
-              addCameraShake(6);
-              const pos = worldToScreen(ball.depth, ball.lateral);
-              addFloatText('POWER SMASH!', pos.x, pos.y - ball.z - 30, '#ff5722');
-            } else {
-              ball.smash = false;
+            // 1. "on little fasteing the bat make also increase ball speed":
+            // Responsive continuous speed boost even for small/subtle bat motions
+            const batSpeedBoost = Math.min(0.018, Math.max(0, totalStrikeForce - 0.0025) * 0.65);
+
+            // 2. "using longer distance to shot harder the ball":
+            // A. Longer stroke travel distance (wind-up & swing sweep distance)
+            const strokeDist = gs.strokeDistance || 0;
+            const strokeDistanceBonus = Math.min(0.012, strokeDist * 0.016);
+            // B. Longer court distance (hitting from deeper back near the baseline provides greater runway/momentum)
+            const courtDepth = gs.paddleDepth || 0.94;
+            const courtDistanceBonus = Math.max(0, (courtDepth - 0.72) * 0.016);
+            const totalDistanceBonus = strokeDistanceBonus + courtDistanceBonus;
+
+            // 3. "make it happen sometimes":
+            // Sweet-spot contact / Crisp lucky strike (~30% chance, or hitting sweet spot center of bat)
+            const offsetFromCenter = Math.abs(offset);
+            const isSweetSpotZone = offsetFromCenter < paddleHalfW * 0.42;
+            const randomSurgeRoll = Math.random() < 0.30;
+            const isSweetSpotSurge = isSweetSpotZone || randomSurgeRoll;
+            const surgeBonus = isSweetSpotSurge ? (0.0045 + Math.random() * 0.004) : 0;
+
+            // Calculate final shot speed
+            // Baseline relaxed rally speed is ~0.0125
+            let targetSpeed = 0.0125 + batSpeedBoost + totalDistanceBonus + surgeBonus;
+
+            // Shot classification & speed scaling (Clean fast drives & long shots, no power smash)
+            const isLongDistanceDrive = totalDistanceBonus > 0.009;
+            const isHardHit = totalStrikeForce > 0.016 || targetSpeed > 0.020;
+
+            if (totalStrikeForce > 0.036) {
+              const extraForce = Math.min(0.014, (totalStrikeForce - 0.036) * 0.35);
+              targetSpeed = Math.max(targetSpeed, 0.028 + extraForce);
             }
 
-            // Decreased return speed for better gameplay flow and control
-            ball.vDepth = -Math.max(0.010, Math.min(0.021, Math.abs(ball.vDepth) * speedFactor));
+            // Cap at a crisp, exhilarating maximum
+            targetSpeed = Math.min(0.038, targetSpeed);
+
+            ball.vDepth = -targetSpeed;
             // Impart lateral angle based on contact point & paddle velocity
-            ball.vLateral = offset * 0.032 + gs.paddleVx * 0.45;
+            ball.vLateral = offset * 0.034 + gs.paddleVx * 0.55;
             // Impart Magnus curve spin based on paddle swipe speed
-            ball.spinLateral = Math.max(-2.0, Math.min(2.0, gs.paddleVx * 45 + offset * 1.2));
-            ball.vz = isSmash ? 2.2 : 3.5;
+            ball.spinLateral = Math.max(-2.8, Math.min(2.8, gs.paddleVx * 50 + offset * 1.4));
             ball.tableBounces = 0;
             ball.lastHitter = 'player';
+
+            const pos = worldToScreen(ball.depth, ball.lateral);
+            const isHighSpeed = targetSpeed > 0.020;
+            ball.smash = isHighSpeed;
+
+            if (isHighSpeed) {
+              gs.totalFastHits = (gs.totalFastHits || 0) + 1;
+              setTotalFastHits(gs.totalFastHits);
+            }
+
+            if (isLongDistanceDrive) {
+              ball.vz = 2.4;
+              sound.whoosh();
+              sound.paddleHit(1.6);
+              addCameraShake(4);
+              addFloatText('LONG DRIVE! 🎯', pos.x, pos.y - ball.z - 30, '#a855f7');
+              spawnHitSparks(pos.x, pos.y - ball.z, 26, gs.playerPaddleColor);
+            } else if (isSweetSpotSurge && (batSpeedBoost > 0.003 || totalStrikeForce > 0.008)) {
+              ball.vz = 2.5;
+              sound.whoosh();
+              sound.paddleHit(1.5);
+              addCameraShake(3);
+              addFloatText('SWEET SPOT! ✨', pos.x, pos.y - ball.z - 30, '#facc15');
+              spawnHitSparks(pos.x, pos.y - ball.z, 24, '#fef08a');
+            } else if (isHardHit) {
+              ball.vz = 2.5; // Low, penetrating fast drive
+              sound.whoosh();
+              sound.paddleHit(1.5);
+              addCameraShake(4);
+              addFloatText('FAST DRIVE! ⚡', pos.x, pos.y - ball.z - 30, '#38bdf8');
+              spawnHitSparks(pos.x, pos.y - ball.z, 22, gs.playerPaddleColor);
+            } else {
+              // Standard hit: even gentle hits now scale subtly with bat motion
+              ball.vz = 3.5;
+              sound.paddleHit(1.0 + batSpeedBoost * 25);
+              spawnHitSparks(pos.x, pos.y - ball.z, 14, gs.playerPaddleColor);
+              if (batSpeedBoost > 0.003) {
+                addFloatText('QUICK HIT! ⚡', pos.x, pos.y - ball.z - 25, '#67e8f9');
+              }
+            }
 
             // Rally Increment
             gs.rallyCount++;
@@ -912,10 +1100,6 @@ export default function App() {
               gs.bestRally = gs.rallyCount;
               setBestRally(gs.bestRally);
             }
-
-            sound.paddleHit(isSmash ? 1.6 : 1.0);
-            const pos = worldToScreen(ball.depth, ball.lateral);
-            spawnHitSparks(pos.x, pos.y - ball.z, isSmash ? 28 : 16, gs.playerPaddleColor);
 
             if (gs.rallyCount % 5 === 0) {
               addFloatText(`RALLY ${gs.rallyCount}!`, pos.x, pos.y - ball.z - 45, '#ffd700');
@@ -933,14 +1117,14 @@ export default function App() {
         const offset = ball.lateral - gs.aiLateral;
         if (Math.abs(offset) < paddleHalfW + 0.09 && ball.z < 65) {
           // Successful CPU Return with relaxed, controllable speed
-          const isAiSmash = ball.z > 35 && Math.random() < 0.35;
-          ball.vDepth = Math.max(0.0095, Math.min(0.019, Math.abs(ball.vDepth) * (isAiSmash ? 1.15 : 1.02)));
+          const isAiCounter = ball.z > 35 && Math.random() < 0.30;
+          ball.vDepth = Math.max(0.0095, Math.min(0.019, Math.abs(ball.vDepth) * (isAiCounter ? 1.15 : 1.02)));
           ball.vLateral = offset * 0.03 + (Math.random() - 0.5) * 0.008;
           ball.spinLateral = (Math.random() - 0.5) * 1.4;
-          ball.vz = isAiSmash ? 2.2 : 3.6;
+          ball.vz = isAiCounter ? 2.4 : 3.6;
           ball.tableBounces = 0;
           ball.lastHitter = 'cpu';
-          ball.smash = isAiSmash;
+          ball.smash = isAiCounter;
 
           gs.rallyCount++;
           setRallyCount(gs.rallyCount);
@@ -949,10 +1133,10 @@ export default function App() {
             setBestRally(gs.bestRally);
           }
 
-          sound.paddleHit(isAiSmash ? 1.4 : 0.9);
+          sound.paddleHit(isAiCounter ? 1.4 : 0.9);
           const pos = worldToScreen(ball.depth, ball.lateral);
-          spawnHitSparks(pos.x, pos.y - ball.z, isAiSmash ? 22 : 14, 'warm');
-          if (isAiSmash) {
+          spawnHitSparks(pos.x, pos.y - ball.z, isAiCounter ? 22 : 14, 'warm');
+          if (isAiCounter) {
             addFloatText('CPU COUNTER!', pos.x, pos.y - ball.z - 25, '#ff3d00');
           }
         } else if (ball.depth <= -0.08) {
@@ -970,13 +1154,15 @@ export default function App() {
       const thick = tableGeom.thickness;
 
       // 1. Table floor shadow (soft realistic ambient shadow on ground)
+      const floorR0 = Math.max(10, 100);
+      const floorR1 = Math.max(floorR0 + 20, near.halfW * 1.25);
       const floorShadowGrad = ctx.createRadialGradient(
         tableGeom.cx,
         near.y + 35,
-        100,
+        floorR0,
         tableGeom.cx,
         near.y + 45,
-        near.halfW * 1.25
+        floorR1
       );
       floorShadowGrad.addColorStop(0, 'rgba(0, 0, 0, 0.65)');
       floorShadowGrad.addColorStop(0.6, 'rgba(0, 0, 0, 0.35)');
@@ -1008,10 +1194,13 @@ export default function App() {
       ctx.stroke();
 
       // 3. 3D Table Apron / Rim Extrusion (Front & Sides)
-      // Front face
+      // Front face: brushed steel metallic chassis as in reference image!
       const frontGrad = ctx.createLinearGradient(0, near.y, 0, near.y + thick);
-      frontGrad.addColorStop(0, '#0a3663');
-      frontGrad.addColorStop(1, '#051d38');
+      frontGrad.addColorStop(0, '#e2e8f0'); // Crisp light metallic silver top highlight
+      frontGrad.addColorStop(0.18, '#94a3b8'); // Brushed steel
+      frontGrad.addColorStop(0.55, '#64748b');
+      frontGrad.addColorStop(0.9, '#334155');
+      frontGrad.addColorStop(1, '#1e293b'); // Dark bottom chassis
       ctx.fillStyle = frontGrad;
       ctx.beginPath();
       ctx.moveTo(tableGeom.cx - near.halfW, near.y);
@@ -1021,55 +1210,83 @@ export default function App() {
       ctx.closePath();
       ctx.fill();
 
-      // Front bottom trim line
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
-      ctx.lineWidth = 1.5;
+      // Brushed horizontal metallic streaks/lines across front face (as seen in image.png)
+      ctx.save();
       ctx.beginPath();
-      ctx.moveTo(tableGeom.cx - near.halfW, near.y + thick);
-      ctx.lineTo(tableGeom.cx + near.halfW, near.y + thick);
-      ctx.stroke();
+      ctx.rect(tableGeom.cx - near.halfW, near.y, near.halfW * 2, thick);
+      ctx.clip();
+      const streaks = [
+        { offset: 0.22, color: 'rgba(255, 255, 255, 0.55)', width: 1.2 },
+        { offset: 0.38, color: 'rgba(15, 23, 42, 0.35)', width: 1.5 },
+        { offset: 0.54, color: 'rgba(255, 255, 255, 0.45)', width: 1.2 },
+        { offset: 0.72, color: 'rgba(15, 23, 42, 0.4)', width: 1.5 },
+      ];
+      for (const s of streaks) {
+        const sy = near.y + thick * s.offset;
+        ctx.strokeStyle = s.color;
+        ctx.lineWidth = s.width;
+        ctx.beginPath();
+        ctx.moveTo(tableGeom.cx - near.halfW + 10, sy);
+        ctx.lineTo(tableGeom.cx + near.halfW - 10, sy);
+        ctx.stroke();
+      }
+      ctx.restore();
 
-      // Left side apron
+      // Solid outline for front apron
+      ctx.strokeStyle = '#0f172a';
+      ctx.lineWidth = 2.5;
+      ctx.strokeRect(tableGeom.cx - near.halfW, near.y, near.halfW * 2, thick);
+
+      // Left side apron in perspective
       const leftApronGrad = ctx.createLinearGradient(
         tableGeom.cx - near.halfW,
         near.y,
         tableGeom.cx - far.halfW,
         far.y
       );
-      leftApronGrad.addColorStop(0, '#082a4d');
-      leftApronGrad.addColorStop(1, '#031426');
+      leftApronGrad.addColorStop(0, '#64748b');
+      leftApronGrad.addColorStop(0.5, '#334155');
+      leftApronGrad.addColorStop(1, '#0f172a');
       ctx.fillStyle = leftApronGrad;
       ctx.beginPath();
       ctx.moveTo(tableGeom.cx - near.halfW, near.y);
       ctx.lineTo(tableGeom.cx - far.halfW, far.y);
-      ctx.lineTo(tableGeom.cx - far.halfW, far.y + thick * 0.7);
+      ctx.lineTo(tableGeom.cx - far.halfW, far.y + thick * 0.65);
       ctx.lineTo(tableGeom.cx - near.halfW, near.y + thick);
       ctx.closePath();
       ctx.fill();
+      ctx.strokeStyle = '#0f172a';
+      ctx.lineWidth = 2;
+      ctx.stroke();
 
-      // Right side apron
+      // Right side apron in perspective
       const rightApronGrad = ctx.createLinearGradient(
         tableGeom.cx + near.halfW,
         near.y,
         tableGeom.cx + far.halfW,
         far.y
       );
-      rightApronGrad.addColorStop(0, '#0a3561');
-      rightApronGrad.addColorStop(1, '#04172b');
+      rightApronGrad.addColorStop(0, '#64748b');
+      rightApronGrad.addColorStop(0.5, '#334155');
+      rightApronGrad.addColorStop(1, '#0f172a');
       ctx.fillStyle = rightApronGrad;
       ctx.beginPath();
       ctx.moveTo(tableGeom.cx + near.halfW, near.y);
       ctx.lineTo(tableGeom.cx + far.halfW, far.y);
-      ctx.lineTo(tableGeom.cx + far.halfW, far.y + thick * 0.7);
+      ctx.lineTo(tableGeom.cx + far.halfW, far.y + thick * 0.65);
       ctx.lineTo(tableGeom.cx + near.halfW, near.y + thick);
       ctx.closePath();
       ctx.fill();
+      ctx.strokeStyle = '#0f172a';
+      ctx.lineWidth = 2;
+      ctx.stroke();
 
-      // 4. Glossy Tournament Table Top Surface
+      // 4. Vibrant Cerulean / Electric Cyan Table Playing Surface (from reference image!)
       const tableSurfGrad = ctx.createLinearGradient(0, tableGeom.topY, 0, tableGeom.bottomY);
-      tableSurfGrad.addColorStop(0, '#0f4c82'); // Darker competition blue at distance
-      tableSurfGrad.addColorStop(0.5, '#1560a1');
-      tableSurfGrad.addColorStop(1, '#1b74be'); // Vibrant blue closer to player
+      tableSurfGrad.addColorStop(0, '#00d4ff'); // Vivid electric sky cyan at CPU end
+      tableSurfGrad.addColorStop(0.32, '#00aaff');
+      tableSurfGrad.addColorStop(0.72, '#0284c7');
+      tableSurfGrad.addColorStop(1, '#0369a1'); // Deep cerulean azure at player end
       ctx.fillStyle = tableSurfGrad;
       ctx.beginPath();
       ctx.moveTo(tableGeom.cx - far.halfW, far.y);
@@ -1079,17 +1296,17 @@ export default function App() {
       ctx.closePath();
       ctx.fill();
 
-      // Subtle diagonal stadium gloss reflection sheen
+      // Smooth diagonal gloss reflection sheen
       const sheenGrad = ctx.createLinearGradient(
-        tableGeom.cx - 200,
+        tableGeom.cx - 240,
         far.y,
-        tableGeom.cx + 250,
+        tableGeom.cx + 280,
         near.y
       );
       sheenGrad.addColorStop(0, 'rgba(255, 255, 255, 0.0)');
-      sheenGrad.addColorStop(0.35, 'rgba(255, 255, 255, 0.08)');
-      sheenGrad.addColorStop(0.5, 'rgba(255, 255, 255, 0.14)');
-      sheenGrad.addColorStop(0.65, 'rgba(255, 255, 255, 0.04)');
+      sheenGrad.addColorStop(0.35, 'rgba(255, 255, 255, 0.14)');
+      sheenGrad.addColorStop(0.5, 'rgba(255, 255, 255, 0.26)');
+      sheenGrad.addColorStop(0.65, 'rgba(255, 255, 255, 0.1)');
       sheenGrad.addColorStop(1, 'rgba(255, 255, 255, 0.0)');
       ctx.fillStyle = sheenGrad;
       ctx.beginPath();
@@ -1100,9 +1317,10 @@ export default function App() {
       ctx.closePath();
       ctx.fill();
 
-      // 5. White Regulation Boundary Lines
+      // 5. Crisp White Regulation Court Lines (from reference image)
+      // Perimeter boundary line (clean solid white)
       ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 4;
+      ctx.lineWidth = 4.5;
       ctx.beginPath();
       ctx.moveTo(tableGeom.cx - far.halfW, far.y);
       ctx.lineTo(tableGeom.cx + far.halfW, far.y);
@@ -1111,47 +1329,68 @@ export default function App() {
       ctx.closePath();
       ctx.stroke();
 
-      // Center lengthwise dividing line
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.88)';
-      ctx.lineWidth = 2.5;
+      // Center lengthwise dividing stripe
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 3.5;
       ctx.beginPath();
       ctx.moveTo(tableGeom.cx, far.y);
       ctx.lineTo(tableGeom.cx, near.y);
       ctx.stroke();
 
-      // 6. Realistic 3D Net with diamond mesh, metal posts, and drop shadow
+      // 6. Sleek Modern Net (with dark emerald mesh and crisp white top tape, matching image.png)
       const netEdge = tableEdgeAt(0.5);
       const netH = 34; // height in screen pixels
-      const postOverhang = 18;
+      const postOverhang = 22;
 
       // Net shadow cast on table
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.38)';
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.42)';
       ctx.beginPath();
       ctx.moveTo(tableGeom.cx - netEdge.halfW, netEdge.y);
       ctx.lineTo(tableGeom.cx + netEdge.halfW, netEdge.y);
-      ctx.lineTo(tableGeom.cx + netEdge.halfW + 4, netEdge.y + 12);
-      ctx.lineTo(tableGeom.cx - netEdge.halfW - 4, netEdge.y + 12);
+      ctx.lineTo(tableGeom.cx + netEdge.halfW + 4, netEdge.y + 10);
+      ctx.lineTo(tableGeom.cx - netEdge.halfW - 4, netEdge.y + 10);
       ctx.closePath();
       ctx.fill();
 
-      // Metal Net Posts
+      // Net Posts on sides
       const postLeftX = tableGeom.cx - netEdge.halfW - postOverhang;
       const postRightX = tableGeom.cx + netEdge.halfW + postOverhang;
-      const postW = 7;
+      const postW = 8;
 
-      // Left post
-      const postGrad = ctx.createLinearGradient(postLeftX, 0, postLeftX + postW, 0);
-      postGrad.addColorStop(0, '#64748b');
-      postGrad.addColorStop(0.5, '#cbd5e1');
-      postGrad.addColorStop(1, '#334155');
+      // Left post bracket
+      const postGrad = ctx.createLinearGradient(postLeftX - postW / 2, 0, postLeftX + postW / 2, 0);
+      postGrad.addColorStop(0, '#1e293b');
+      postGrad.addColorStop(0.4, '#94a3b8');
+      postGrad.addColorStop(1, '#0f172a');
       ctx.fillStyle = postGrad;
-      ctx.fillRect(postLeftX - postW / 2, netEdge.y - netH - 4, postW, netH + 18);
+      ctx.beginPath();
+      if (typeof ctx.roundRect === 'function') {
+        ctx.roundRect(postLeftX - postW / 2, netEdge.y - netH - 5, postW, netH + 18, 3);
+      } else {
+        ctx.rect(postLeftX - postW / 2, netEdge.y - netH - 5, postW, netH + 18);
+      }
+      ctx.fill();
+      ctx.strokeStyle = '#020617';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
 
-      // Right post
-      ctx.fillRect(postRightX - postW / 2, netEdge.y - netH - 4, postW, netH + 18);
+      // Right post bracket
+      ctx.fillStyle = postGrad;
+      ctx.beginPath();
+      if (typeof ctx.roundRect === 'function') {
+        ctx.roundRect(postRightX - postW / 2, netEdge.y - netH - 5, postW, netH + 18, 3);
+      } else {
+        ctx.rect(postRightX - postW / 2, netEdge.y - netH - 5, postW, netH + 18);
+      }
+      ctx.fill();
+      ctx.stroke();
 
-      // Net Mesh (Semi-transparent grid texture)
-      ctx.fillStyle = 'rgba(230, 235, 245, 0.35)';
+      // Net Body Mesh (Semi-transparent dark emerald/charcoal green mesh as seen in image)
+      const netMeshGrad = ctx.createLinearGradient(0, netEdge.y - netH, 0, netEdge.y);
+      netMeshGrad.addColorStop(0, 'rgba(15, 45, 28, 0.7)');
+      netMeshGrad.addColorStop(0.8, 'rgba(10, 32, 20, 0.65)');
+      netMeshGrad.addColorStop(1, 'rgba(6, 20, 12, 0.78)');
+      ctx.fillStyle = netMeshGrad;
       ctx.beginPath();
       ctx.moveTo(postLeftX, netEdge.y - netH);
       ctx.lineTo(postRightX, netEdge.y - netH);
@@ -1161,9 +1400,9 @@ export default function App() {
       ctx.fill();
 
       // Net grid vertical mesh cords
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.45)';
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
       ctx.lineWidth = 1;
-      const meshColumns = 38;
+      const meshColumns = 42;
       const netSpan = postRightX - postLeftX;
       for (let i = 1; i < meshColumns; i++) {
         const frac = i / meshColumns;
@@ -1176,7 +1415,7 @@ export default function App() {
       }
 
       // Net horizontal mesh cords
-      const meshRows = 5;
+      const meshRows = 6;
       for (let j = 1; j <= meshRows; j++) {
         const frac = j / (meshRows + 1);
         const curY = (netEdge.y - netH) + netH * frac;
@@ -1186,88 +1425,218 @@ export default function App() {
         ctx.stroke();
       }
 
-      // White reinforced Net Top Tape (Crisp binding band)
+      // Bottom tape of net resting on table
+      ctx.strokeStyle = 'rgba(15, 23, 42, 0.6)';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(tableGeom.cx - netEdge.halfW, netEdge.y);
+      ctx.lineTo(tableGeom.cx + netEdge.halfW, netEdge.y);
+      ctx.stroke();
+
+      // Crisp White Reinforced Net Top Tape (Bold white band as seen in reference image)
       ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 4.5;
+      ctx.lineWidth = 5.5;
+      ctx.lineCap = 'round';
       ctx.beginPath();
       ctx.moveTo(postLeftX, netEdge.y - netH);
       ctx.lineTo(postRightX, netEdge.y - netH);
       ctx.stroke();
+      ctx.lineCap = 'butt';
     };
 
     const drawPaddle = (lateral: number, depth: number, isPlayer: boolean, tiltAngle: number) => {
       const gs = gameStateRef.current;
       const { x, y } = worldToScreen(depth, lateral);
-      const scale = 0.46 + depth * 0.88; // 3D scaling
+      const scale = Math.max(0.2, 0.48 + depth * 0.92); // 3D scaling
       ctx.save();
       ctx.translate(x, y);
       ctx.scale(scale, scale);
       ctx.rotate(tiltAngle);
 
-      // Paddle Drop Shadow
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+      // 1. Paddle Dynamic Drop Shadow
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.42)';
       ctx.beginPath();
-      ctx.ellipse(5, 22, 28, 12, 0, 0, Math.PI * 2);
+      ctx.ellipse(4, 26, 32, 14, 0, 0, Math.PI * 2);
       ctx.fill();
 
-      // Wooden Handle with flared contours
-      const handleGrad = ctx.createLinearGradient(-10, 10, 10, 52);
-      handleGrad.addColorStop(0, '#8d5524');
-      handleGrad.addColorStop(0.5, '#d49b6a');
-      handleGrad.addColorStop(1, '#5c3317');
+      // 2. Natural Flared Wooden Handle (Amber beech wood tone as in reference image)
+      // Ergonomic flared handle contour
+      const handleGrad = ctx.createLinearGradient(-10, 8, 10, 52);
+      handleGrad.addColorStop(0, '#f59e0b'); // Warm honey maple
+      handleGrad.addColorStop(0.3, '#d97706');
+      handleGrad.addColorStop(0.7, '#b45309');
+      handleGrad.addColorStop(1, '#78350f'); // Deep wood core
       ctx.fillStyle = handleGrad;
       ctx.beginPath();
-      ctx.moveTo(-7, 8);
-      ctx.lineTo(7, 8);
-      ctx.lineTo(10, 48);
-      ctx.lineTo(-10, 48);
+      // Flared handle curve
+      ctx.moveTo(-7.5, 8);
+      ctx.quadraticCurveTo(-6, 28, -10.5, 50);
+      ctx.quadraticCurveTo(0, 55, 10.5, 50);
+      ctx.quadraticCurveTo(6, 28, 7.5, 8);
       ctx.closePath();
       ctx.fill();
 
-      // Grip Stripe on Handle
-      ctx.strokeStyle = '#2b1708';
-      ctx.lineWidth = 1.5;
+      // Ergonomic handle bevel & side wood highlight
+      ctx.strokeStyle = '#fde68a';
+      ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.moveTo(-1, 8);
-      ctx.lineTo(-1, 48);
+      ctx.moveTo(-6, 12);
+      ctx.quadraticCurveTo(-4.8, 28, -8.5, 48);
       ctx.stroke();
 
-      // Multi-ply Wood Blade Edge (Subtle bevel ring around rubber)
+      // Center Grip Dark Wood Inlay Stripe
+      const inlayGrad = ctx.createLinearGradient(-2.5, 10, 2.5, 50);
+      inlayGrad.addColorStop(0, '#78350f');
+      inlayGrad.addColorStop(0.5, '#451a03');
+      inlayGrad.addColorStop(1, '#78350f');
+      ctx.fillStyle = inlayGrad;
       ctx.beginPath();
-      ctx.ellipse(0, -12, 34, 30, 0, 0, Math.PI * 2);
-      ctx.fillStyle = '#edd2a4';
+      ctx.moveTo(-2.5, 11);
+      ctx.lineTo(2.5, 11);
+      ctx.lineTo(3.2, 49);
+      ctx.lineTo(-3.2, 49);
+      ctx.closePath();
       ctx.fill();
-      ctx.strokeStyle = '#8a5d3b';
+
+      // Handle dark contour stroke
+      ctx.strokeStyle = '#291807';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(-7.5, 8);
+      ctx.quadraticCurveTo(-6, 28, -10.5, 50);
+      ctx.quadraticCurveTo(0, 55, 10.5, 50);
+      ctx.quadraticCurveTo(6, 28, 7.5, 8);
+      ctx.stroke();
+
+      // Handle bottom butt rounded cap
+      ctx.fillStyle = '#451a03';
+      ctx.beginPath();
+      ctx.ellipse(0, 50.5, 10, 3, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Wooden blade neck wings (connecting handle seamlessly to blade base)
+      ctx.fillStyle = '#b45309';
+      ctx.beginPath();
+      ctx.moveTo(-10, 8);
+      ctx.quadraticCurveTo(0, 2, 10, 8);
+      ctx.lineTo(8, -4);
+      ctx.quadraticCurveTo(0, -6, -8, -4);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = '#291807';
+      ctx.lineWidth = 1.8;
+      ctx.stroke();
+
+      // 3. Multi-ply Wood Blade Edge (Subtle outer wooden perimeter)
+      ctx.beginPath();
+      ctx.ellipse(0, -14, 38, 33, 0, 0, Math.PI * 2);
+      ctx.fillStyle = '#edd2a4'; // Natural 5-ply Koto/Ayous wood core
+      ctx.fill();
+      ctx.strokeStyle = '#291807';
       ctx.lineWidth = 2.5;
       ctx.stroke();
 
-      // High-friction Rubber Face
-      const rubberGrad = ctx.createRadialGradient(-8, -20, 4, 0, -12, 32);
+      // 4. THE ICONIC WHITE / LIGHT CONTRASTING INNER RIM (As featured in the reference image!)
+      ctx.beginPath();
+      ctx.ellipse(0, -14, 35, 30, 0, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffffff'; // Bright solid white border band
+      ctx.fill();
+      ctx.strokeStyle = '#18110b';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      // 5. High-Tension Colored Rubber Face
+      const rubberGrad = ctx.createRadialGradient(-8, -24, 4, 0, -14, 32);
       if (isPlayer) {
-        // Player's selected rubber color: blue, green, or purple
-        const colorKey = gs.playerPaddleColor || 'blue';
-        const colorCfg = PADDLE_COLOR_CONFIG[colorKey] || PADDLE_COLOR_CONFIG.blue;
+        const colorKey = gs.playerPaddleColor || 'green';
+        const colorCfg = PADDLE_COLOR_CONFIG[colorKey] || PADDLE_COLOR_CONFIG.green;
         rubberGrad.addColorStop(0, colorCfg.light);
-        rubberGrad.addColorStop(0.68, colorCfg.mid);
+        rubberGrad.addColorStop(0.55, colorCfg.mid);
         rubberGrad.addColorStop(1, colorCfg.dark);
       } else {
-        // Black high-tension rubber face for CPU
-        rubberGrad.addColorStop(0, '#475569');
-        rubberGrad.addColorStop(0.65, '#1e293b');
-        rubberGrad.addColorStop(1, '#0f172a');
+        // In reference image, CPU paddle has attractive vibrant sky-blue rubber!
+        rubberGrad.addColorStop(0, '#38bdf8');
+        rubberGrad.addColorStop(0.58, '#0284c7');
+        rubberGrad.addColorStop(1, '#0369a1');
       }
 
       ctx.beginPath();
-      ctx.ellipse(0, -12, 31, 27, 0, 0, Math.PI * 2);
+      ctx.ellipse(0, -14, 31, 26, 0, 0, Math.PI * 2);
       ctx.fillStyle = rubberGrad;
       ctx.fill();
 
-      // Rubber Face Specular Gloss Arc Highlight
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.45)';
+      // 6. ARTISTIC EMBOSSED LEAF / FEATHER CHEVRON TEXTURE (From reference image!)
+      ctx.save();
+      ctx.beginPath();
+      ctx.ellipse(0, -14, 30, 25, 0, 0, Math.PI * 2);
+      ctx.clip();
+
+      // Center stem vein
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.22)';
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.arc(0, -14, 25, Math.PI * 1.05, Math.PI * 1.85);
+      ctx.moveTo(0, 9);
+      ctx.lineTo(0, -35);
       ctx.stroke();
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.22)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0.8, 9);
+      ctx.lineTo(0.8, -35);
+      ctx.stroke();
+
+      // Symmetrical curved leaf veins / chevron arches fanning upward and outward
+      const leafVeins = [
+        { y: 3, w: 18, curve: 11 },
+        { y: -5, w: 23, curve: 13 },
+        { y: -13, w: 25, curve: 14 },
+        { y: -21, w: 21, curve: 12 },
+        { y: -29, w: 14, curve: 8 },
+      ];
+
+      for (const lv of leafVeins) {
+        // Shadow pass
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.18)';
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        ctx.moveTo(0, lv.y);
+        ctx.quadraticCurveTo(-lv.w * 0.45, lv.y + 2, -lv.w, lv.y - lv.curve);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(0, lv.y);
+        ctx.quadraticCurveTo(lv.w * 0.45, lv.y + 2, lv.w, lv.y - lv.curve);
+        ctx.stroke();
+
+        // Highlight pass (gives authentic embossed 3D tactile rubber look)
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.24)';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(0, lv.y - 0.8);
+        ctx.quadraticCurveTo(-lv.w * 0.45, lv.y + 1.2, -lv.w, lv.y - lv.curve - 0.8);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(0, lv.y - 0.8);
+        ctx.quadraticCurveTo(lv.w * 0.45, lv.y + 1.2, lv.w, lv.y - lv.curve - 0.8);
+        ctx.stroke();
+      }
+
+      ctx.restore();
+
+      // 7. Rubber Face Specular Gloss Arc Highlight (Curved light sheen on high-tension polymer)
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.52)';
+      ctx.lineWidth = 2.4;
+      ctx.beginPath();
+      ctx.arc(0, -16, 24, Math.PI * 1.08, Math.PI * 1.82);
+      ctx.stroke();
+
+      // Subtle sweet-spot center highlight
+      const sweetGrad = ctx.createRadialGradient(-3, -16, 1, -3, -16, 12);
+      sweetGrad.addColorStop(0, 'rgba(255, 255, 255, 0.25)');
+      sweetGrad.addColorStop(1, 'rgba(255, 255, 255, 0.0)');
+      ctx.fillStyle = sweetGrad;
+      ctx.beginPath();
+      ctx.arc(-3, -16, 12, 0, Math.PI * 2);
+      ctx.fill();
 
       ctx.restore();
     };
@@ -1278,14 +1647,15 @@ export default function App() {
       if (!ball) return;
 
       const { x: sx, y: sy } = worldToScreen(ball.depth, ball.lateral);
-      const scale = 0.45 + ball.depth * 0.85;
-      const baseR = 10 * scale;
+      const scale = Math.max(0.2, 0.45 + ball.depth * 0.85);
+      const baseR = Math.max(2.5, 10 * scale);
+      const safeZ = Math.max(0, ball.z);
 
       // 1. Dynamic Surface Shadow beneath ball
       // Shadow scales wider and fades as ball.z increases
-      const shadowW = baseR * (1 + ball.z * 0.016);
-      const shadowH = (baseR * 0.48) * (1 + ball.z * 0.016);
-      const shadowAlpha = Math.max(0.08, 0.58 - ball.z * 0.007);
+      const shadowW = Math.max(2, baseR * (1 + safeZ * 0.016));
+      const shadowH = Math.max(1, (baseR * 0.48) * (1 + safeZ * 0.016));
+      const shadowAlpha = Math.max(0.08, 0.58 - safeZ * 0.007);
 
       const shadowGrad = ctx.createRadialGradient(sx, sy, 0, sx, sy, shadowW);
       shadowGrad.addColorStop(0, `rgba(0, 0, 0, ${shadowAlpha})`);
@@ -1304,7 +1674,7 @@ export default function App() {
           ctx.save();
           ctx.globalAlpha = reflectAlpha;
           ctx.beginPath();
-          ctx.ellipse(sx, reflectY, baseR * 0.9, baseR * 0.5, 0, 0, Math.PI * 2);
+          ctx.ellipse(sx, reflectY, Math.max(1, baseR * 0.9), Math.max(0.5, baseR * 0.5), 0, 0, Math.PI * 2);
           ctx.fillStyle = '#ffeedb';
           ctx.fill();
           ctx.restore();
@@ -1317,11 +1687,11 @@ export default function App() {
         for (let i = 0; i < gs.trail.length; i++) {
           const pt = gs.trail[i];
           const trAlpha = (pt.alpha * (1 - i / gs.trail.length)) * 0.6;
-          const trR = pt.r * (1 - i * 0.04);
+          const trR = Math.max(1, pt.r * (1 - i * 0.04));
           ctx.beginPath();
-          ctx.arc(pt.x, pt.y, Math.max(2, trR), 0, Math.PI * 2);
+          ctx.arc(pt.x, pt.y, Math.max(1.5, trR), 0, Math.PI * 2);
           ctx.fillStyle = pt.smash
-            ? `rgba(255, 87, 34, ${trAlpha})`
+            ? `rgba(56, 189, 248, ${trAlpha})`
             : `rgba(255, 235, 140, ${trAlpha})`;
           ctx.fill();
         }
@@ -1332,32 +1702,35 @@ export default function App() {
       const ballY = sy - ball.z;
       ctx.save();
 
-      // Ball Outer Glow if power smash
+      // Ball Outer Glow for fast drive / fast serve
       if (ball.smash) {
-        ctx.shadowColor = '#ff5722';
+        ctx.shadowColor = ball.lastHitter === 'player' ? '#38bdf8' : '#fb923c';
         ctx.shadowBlur = 18;
       }
 
       // 3D Spherical Radial Gradient
       const lightOffsetX = sx - baseR * 0.32;
       const lightOffsetY = ballY - baseR * 0.35;
+      const r0 = Math.max(0.1, baseR * 0.1);
+      const r1 = Math.max(r0 + 0.5, baseR);
       const ballGrad = ctx.createRadialGradient(
         lightOffsetX,
         lightOffsetY,
-        baseR * 0.1,
+        r0,
         sx,
         ballY,
-        baseR
+        r1
       );
-      // Premium warm 3-star celluloid tournament ball
-      ballGrad.addColorStop(0, '#ffffff');
-      ballGrad.addColorStop(0.3, '#fff4cb');
-      ballGrad.addColorStop(0.8, '#f59e0b');
-      ballGrad.addColorStop(1, '#b45309');
+      // Radiant tournament ball (bright optic gold as in reference image)
+      ballGrad.addColorStop(0, '#ffffff'); // Specular glint
+      ballGrad.addColorStop(0.2, '#fef9c3'); // Bright light yellow
+      ballGrad.addColorStop(0.55, '#facc15'); // Optic tournament gold
+      ballGrad.addColorStop(0.85, '#eab308'); // Warm body
+      ballGrad.addColorStop(1, '#ca8a04'); // Deep spherical 3D shading
 
       ctx.fillStyle = ballGrad;
       ctx.beginPath();
-      ctx.arc(sx, ballY, baseR, 0, Math.PI * 2);
+      ctx.arc(sx, ballY, Math.max(1.5, baseR), 0, Math.PI * 2);
       ctx.fill();
 
       // Spinning Ball Seam / ITTF 3-Star Mark rotating with ball rotation
@@ -1367,13 +1740,13 @@ export default function App() {
       ctx.strokeStyle = 'rgba(180, 83, 9, 0.45)';
       ctx.lineWidth = 1.2;
       ctx.beginPath();
-      ctx.arc(0, 0, baseR * 0.68, 0, Math.PI * 1.1);
+      ctx.arc(0, 0, Math.max(1, baseR * 0.68), 0, Math.PI * 1.1);
       ctx.stroke();
 
       // Subtle star imprint
       ctx.fillStyle = 'rgba(180, 83, 9, 0.45)';
       ctx.beginPath();
-      ctx.arc(baseR * 0.25, 0, 1.2 * scale, 0, Math.PI * 2);
+      ctx.arc(baseR * 0.25, 0, Math.max(0.5, 1.2 * scale), 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
 
@@ -1389,7 +1762,7 @@ export default function App() {
         ctx.shadowColor = p.color;
         ctx.shadowBlur = 6;
         ctx.beginPath();
-        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+        ctx.arc(p.x, p.y, Math.max(0.5, p.size), 0, Math.PI * 2);
         ctx.fill();
         ctx.restore();
       }
@@ -1411,18 +1784,18 @@ export default function App() {
     };
 
     const drawArenaLighting = () => {
-      // Stadium Vignette & Ambient Radial Light
+      // Atmospheric jungle lighting and soft framing vignette
       const vigGrad = ctx.createRadialGradient(
         CANVAS_W / 2,
-        CANVAS_H * 0.45,
-        180,
+        CANVAS_H * 0.48,
+        220,
         CANVAS_W / 2,
         CANVAS_H * 0.5,
-        CANVAS_H * 0.95
+        CANVAS_H * 0.98
       );
       vigGrad.addColorStop(0, 'rgba(0, 0, 0, 0)');
-      vigGrad.addColorStop(0.7, 'rgba(3, 10, 22, 0.45)');
-      vigGrad.addColorStop(1, 'rgba(1, 4, 10, 0.85)');
+      vigGrad.addColorStop(0.7, 'rgba(6, 20, 14, 0.12)');
+      vigGrad.addColorStop(1, 'rgba(2, 8, 6, 0.52)');
       ctx.fillStyle = vigGrad;
       ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
     };
@@ -1479,10 +1852,26 @@ export default function App() {
   return (
     <div
       id="pingpong-app"
-      className="relative w-screen h-screen overflow-hidden select-none bg-gradient-to-br from-slate-950 via-emerald-950 to-slate-900 flex items-center justify-center font-sans"
+      className="relative w-screen h-screen overflow-hidden select-none bg-slate-950 flex items-center justify-center font-sans"
+      onPointerDown={(e) => {
+        // If clicking on UI buttons or settings chips, let those click handlers work
+        const target = e.target as HTMLElement;
+        if (target.closest('button') || target.closest('#gameover-modal')) return;
+        handlePointerDown();
+      }}
     >
-      {/* Background Arena Spotlight */}
-      <div className="absolute inset-0 pointer-events-none opacity-40 bg-[radial-gradient(circle_at_50%_40%,rgba(16,185,129,0.25)_0%,transparent_70%)]" />
+      {/* Tropical Jungle Background Environment (from reference image) */}
+      <div className="absolute inset-0 overflow-hidden pointer-events-none">
+        <img
+          src={jungleCourtBg}
+          alt="Jungle Table Tennis Court"
+          referrerPolicy="no-referrer"
+          className="w-full h-full object-cover object-center scale-105 filter brightness-95 contrast-105"
+        />
+        {/* Soft tropical sunbeam & vignette overlay */}
+        <div className="absolute inset-0 bg-gradient-to-t from-slate-950/80 via-transparent to-slate-950/50" />
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_40%,rgba(74,222,128,0.12)_0%,rgba(6,20,12,0.65)_100%)]" />
+      </div>
 
       {/* Top Glassmorphism HUD */}
       <div className="absolute top-4 left-1/2 -translate-x-1/2 w-[94%] max-w-4xl z-20 flex items-center justify-between px-6 py-3 rounded-2xl bg-slate-900/60 backdrop-blur-xl border border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.5)]">
@@ -1502,20 +1891,42 @@ export default function App() {
           </div>
           <div
             id="scoreboard-player-score-box"
-            key={`player-score-box-${playerScore}`}
-            className={`flex flex-col scoreboard-player-bloom ${
-              playerScore > 0 ? 'animate-score-box-bloom' : ''
+            key={`player-score-box-${playerScore}-${gameOver === 'player' ? 'winner' : 'normal'}`}
+            className={`relative flex flex-col px-3.5 py-1.5 rounded-xl border transition-all duration-300 ${
+              gameOver === 'player'
+                ? 'animate-gold-match-win-flash border-amber-300 text-amber-950 z-20'
+                : `scoreboard-player-bloom border-transparent ${
+                    playerScore > 0 ? 'animate-score-box-bloom' : ''
+                  }`
             }`}
           >
-            <div className="flex items-center gap-1.5">
-              <span className="text-xs uppercase tracking-wider text-slate-300 font-semibold">Player</span>
+            {/* Distinct Gold Flash Pulse & Light Sweep across the entire container on Match Victory */}
+            {gameOver === 'player' && (
+              <>
+                <div className="absolute inset-0 pointer-events-none rounded-xl overflow-hidden">
+                  <div className="absolute inset-0 bg-gradient-to-r from-transparent via-amber-100/80 to-transparent -translate-x-full animate-gold-wave-sweep" />
+                </div>
+                <div className="absolute -top-2.5 -right-2 px-1.5 py-0.5 rounded-full bg-gradient-to-r from-amber-400 to-yellow-300 text-[9px] font-black text-slate-950 uppercase tracking-wider shadow-md animate-bounce z-30">
+                  MATCH WON!
+                </div>
+              </>
+            )}
+
+            <div className="flex items-center gap-1.5 relative z-10">
+              <span className={`text-xs uppercase tracking-wider font-semibold transition-colors ${gameOver === 'player' ? 'text-amber-950 font-black' : 'text-slate-300'}`}>
+                Player
+              </span>
               <span className={`w-2 h-2 rounded-full shadow-sm ${PADDLE_COLOR_CONFIG[playerPaddleColor].dotColorClass}`} />
             </div>
             <span
               id="scoreboard-player-score"
               key={`player-score-${playerScore}`}
-              className={`text-3xl font-black tabular-nums leading-none drop-shadow origin-left inline-block transition-colors ${
-                playerScore > 0 ? 'animate-score-zoom-player text-amber-300' : 'text-white'
+              className={`text-3xl font-black tabular-nums leading-none drop-shadow origin-left inline-block transition-colors relative z-10 ${
+                gameOver === 'player'
+                  ? 'text-amber-950 drop-shadow-[0_2px_4px_rgba(255,255,255,0.7)]'
+                  : playerScore > 0
+                  ? 'animate-score-zoom-player text-amber-300'
+                  : 'text-white'
               }`}
             >
               {playerScore}
