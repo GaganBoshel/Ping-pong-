@@ -3,8 +3,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { Volume2, VolumeX, RotateCcw, Trophy, Flame, Play, Sparkles, Shield, Award, Palette } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  Award,
+  Flame,
+  Palette,
+  Play,
+  RotateCcw,
+  Shield,
+  Sparkles,
+  Trophy,
+  Volume2,
+  VolumeX,
+} from 'lucide-react';
 import jungleCourtBg from './assets/images/jungle_court_bg_1789000821397.jpg';
 
 // ==========================================
@@ -12,21 +23,27 @@ import jungleCourtBg from './assets/images/jungle_court_bg_1789000821397.jpg';
 // ==========================================
 class SoundSynth {
   private ctx: AudioContext | null = null;
-  public muted: boolean = false;
+  public muted = false;
 
-  public init() {
+  public init(): void {
     if (!this.ctx) {
-      const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const AudioContextClass =
+        window.AudioContext ??
+        (window as Window & {
+          webkitAudioContext?: typeof AudioContext;
+        }).webkitAudioContext;
+
       if (AudioContextClass) {
         this.ctx = new AudioContextClass();
       }
     }
-    if (this.ctx && this.ctx.state === 'suspended') {
-      this.ctx.resume().catch(() => {});
+
+    if (this.ctx?.state === 'suspended') {
+      void this.ctx.resume().catch(() => undefined);
     }
   }
 
-  public paddleHit(power = 1.0) {
+  public paddleHit(power = 1.0): void {
     if (this.muted) return;
     this.init();
     if (!this.ctx) return;
@@ -64,7 +81,7 @@ class SoundSynth {
     snapOsc.stop(now + 0.03);
   }
 
-  public tableBounce(power = 1.0) {
+  public tableBounce(power = 1.0): void {
     if (this.muted) return;
     this.init();
     if (!this.ctx) return;
@@ -86,7 +103,7 @@ class SoundSynth {
     osc.stop(now + 0.04);
   }
 
-  public netHit() {
+  public netHit(): void {
     if (this.muted) return;
     this.init();
     if (!this.ctx) return;
@@ -107,7 +124,7 @@ class SoundSynth {
     osc.stop(now + 0.1);
   }
 
-  public pointScore(isPlayer: boolean) {
+  public pointScore(isPlayer: boolean): void {
     if (this.muted) return;
     this.init();
     if (!this.ctx) return;
@@ -136,7 +153,7 @@ class SoundSynth {
     });
   }
 
-  public matchPoint() {
+  public matchPoint(): void {
     if (this.muted) return;
     this.init();
     if (!this.ctx) return;
@@ -157,7 +174,7 @@ class SoundSynth {
     });
   }
 
-  public victory() {
+  public victory(): void {
     if (this.muted) return;
     this.init();
     if (!this.ctx) return;
@@ -186,7 +203,7 @@ class SoundSynth {
     });
   }
 
-  public defeat() {
+  public defeat(): void {
     if (this.muted) return;
     this.init();
     if (!this.ctx) return;
@@ -213,7 +230,7 @@ class SoundSynth {
     });
   }
 
-  public whoosh() {
+  public whoosh(): void {
     if (this.muted) return;
     this.init();
     if (!this.ctx) return;
@@ -1854,7 +1871,7 @@ export default function App() {
     <div
       id="pingpong-app"
       className="relative w-screen h-screen overflow-hidden select-none bg-slate-950 flex items-center justify-center font-sans"
-      onPointerDown={(e) => {
+      onPointerDown={(e: React.PointerEvent<HTMLDivElement>) => {
         // If clicking on UI buttons or settings chips, let those click handlers work
         const target = e.target as HTMLElement;
         if (target.closest('button') || target.closest('#gameover-modal')) return;
@@ -2058,13 +2075,13 @@ export default function App() {
         className={`relative w-full h-full max-w-6xl max-h-[88vh] flex items-center justify-center p-2 touch-none select-none ${
           screenShakeActive ? 'animate-screen-shake' : ''
         }`}
-        onMouseMove={(e) => handlePointerMove(e.clientX, e.clientY)}
-        onTouchMove={(e) => {
+        onMouseMove={(e: React.MouseEvent<HTMLDivElement>) => handlePointerMove(e.clientX, e.clientY)}
+        onTouchMove={(e: React.TouchEvent<HTMLDivElement>) => {
           if (e.touches.length > 0) {
             handlePointerMove(e.touches[0].clientX, e.touches[0].clientY);
           }
         }}
-        onPointerMove={(e) => handlePointerMove(e.clientX, e.clientY)}
+        onPointerMove={(e: React.PointerEvent<HTMLDivElement>) => handlePointerMove(e.clientX, e.clientY)}
         onMouseDown={handlePointerDown}
         onTouchStart={handlePointerDown}
       >
