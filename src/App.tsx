@@ -6,15 +6,23 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Award,
+  Bot,
+  Check,
+  Copy,
   Flame,
+  Link2,
   Palette,
   Play,
   RotateCcw,
+  Share2,
   Shield,
   Sparkles,
   Trophy,
+  Users,
   Volume2,
   VolumeX,
+  Wifi,
+  WifiOff,
 } from 'lucide-react';
 import jungleCourtBg from './assets/images/jungle_court_bg_1789000821397.jpg';
 
@@ -371,6 +379,19 @@ export default function App() {
   // Default to vibrant Jungle Emerald paddle color as seen in the reference image
   const [playerPaddleColor, setPlayerPaddleColor] = useState<PaddleColor>('green');
 
+  // Game Mode & Multiplayer State
+  const [gameMode, setGameMode] = useState<'cpu' | 'friend'>('cpu');
+  const [friendRoomId, setFriendRoomId] = useState<string | null>(null);
+  const [multiplayerStatus, setMultiplayerStatus] = useState<
+    'idle' | 'connecting' | 'waiting' | 'connected' | 'disconnected'
+  >('idle');
+  const [multiplayerRole, setMultiplayerRole] = useState<'p1' | 'p2' | null>(null);
+  const [opponentPaddleColor, setOpponentPaddleColor] = useState<PaddleColor>('blue');
+  const [copiedLink, setCopiedLink] = useState(false);
+  const [showInviteModal, setShowInviteModal] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
+  const lastPaddleSendTime = useRef<number>(0);
+
   // Game UI State
   const [playerScore, setPlayerScore] = useState(0);
   const [cpuScore, setCpuScore] = useState(0);
@@ -392,6 +413,10 @@ export default function App() {
 
   // Game logic refs to avoid frame tearing
   const gameStateRef = useRef({
+    gameMode: 'cpu' as 'cpu' | 'friend',
+    multiplayerRole: null as 'p1' | 'p2' | null,
+    aiDepth: 0.05,
+    opponentPaddleColor: 'blue' as PaddleColor,
     playerScore: 0,
     cpuScore: 0,
     playerPaddleColor,
@@ -589,7 +614,7 @@ export default function App() {
     }
 
     // Auto-launch CPU serve if CPU is serving
-    if (nextServer === 'cpu') {
+    if (nextServer === 'cpu' && gs.gameMode === 'cpu') {
       triggerCpuServe();
     }
   }, [createBall, triggerCpuServe]);
@@ -598,6 +623,19 @@ export default function App() {
   const handlePointScored = useCallback((winner: 'player' | 'cpu') => {
     const gs = gameStateRef.current;
     if (gs.gameOver) return;
+
+    // In Friend Multiplayer mode, report to server for authoritative scoring
+    if (gs.gameMode === 'friend' && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: 'point_scored',
+          winnerRole: winner === 'player' ? 'self' : 'opponent',
+          reason: winner === 'player' ? 'Player scored' : 'Opponent scored',
+        })
+      );
+      gs.ball = null;
+      return;
+    }
 
     sound.pointScore(winner === 'player');
 
@@ -673,6 +711,13 @@ export default function App() {
   // Restart complete match
   const startNewMatch = useCallback(() => {
     const gs = gameStateRef.current;
+
+    // In Friend multiplayer, signal rematch to the room
+    if (gs.gameMode === 'friend' && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'restart_match' }));
+      return;
+    }
+
     gs.playerScore = 0;
     gs.cpuScore = 0;
     gs.rallyCount = 0;
@@ -756,12 +801,35 @@ export default function App() {
       (gs.paddleVy || 0) * 2.8
     );
     gs.strokeDistance = Math.min(2.5, (gs.strokeDistance || 0) + moveDist);
+
+    // Broadcast paddle position in friend multiplayer
+    if (gs.gameMode === 'friend' && wsRef.current?.readyState === WebSocket.OPEN) {
+      const now = performance.now();
+      if (now - lastPaddleSendTime.current >= 16) {
+        lastPaddleSendTime.current = now;
+        wsRef.current.send(
+          JSON.stringify({
+            type: 'paddle_move',
+            lateral: gs.paddleLateral,
+            depth: gs.paddleDepth,
+            paddleVx: gs.paddleVx,
+            paddleVy: gs.paddleVy,
+            paddleTilt: gs.paddleTilt,
+          })
+        );
+      }
+    }
   }, [tableEdgeAt, tableGeom.bottomY, tableGeom.cx, tableGeom.topY]);
 
   const handlePointerDown = useCallback(() => {
     sound.init();
     const gs = gameStateRef.current;
     if (gs.gameOver) return;
+
+    // In friend mode, only the designated server can serve
+    if (gs.gameMode === 'friend' && gs.server !== 'player') {
+      return;
+    }
 
     if (gs.serving || !gs.ball) {
       if (!gs.ball) {
@@ -815,13 +883,389 @@ export default function App() {
         gs.totalFastHits = (gs.totalFastHits || 0) + 1;
         setTotalFastHits(gs.totalFastHits);
       }
+
+      // Transmit serve to opponent in friend multiplayer mode
+      if (gs.gameMode === 'friend' && wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(
+          JSON.stringify({
+            type: 'serve',
+            ball: {
+              depth: gs.ball.depth,
+              lateral: gs.ball.lateral,
+              z: gs.ball.z,
+              vDepth: gs.ball.vDepth,
+              vLateral: gs.ball.vLateral,
+              vz: gs.ball.vz,
+              spinLateral: gs.ball.spinLateral,
+              smash: gs.ball.smash,
+            },
+          })
+        );
+      }
     }
   }, [addCameraShake, addFloatText, createBall, spawnHitSparks, worldToScreen]);
 
-  // Initial mount auto-serve so match can start right away without clicking Restart Match
-  useEffect(() => {
+  // ==========================================
+  // REAL-TIME MULTIPLAYER WEBSOCKET CONNECTION
+  // ==========================================
+  const connectMultiplayer = useCallback(
+    (roomId: string, paddleColor: PaddleColor) => {
+      if (wsRef.current) {
+        try {
+          wsRef.current.close();
+        } catch (_) {}
+        wsRef.current = null;
+      }
+
+      setMultiplayerStatus('connecting');
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        ws.send(
+          JSON.stringify({
+            type: 'join',
+            roomId,
+            paddleColor,
+          })
+        );
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          const gs = gameStateRef.current;
+
+          switch (msg.type) {
+            case 'joined': {
+              setMultiplayerRole(msg.role);
+              gs.multiplayerRole = msg.role;
+              if (msg.waitingForOpponent) {
+                setMultiplayerStatus('waiting');
+                setBannerMessage({
+                  text: 'Waiting for Friend...',
+                  sub: 'Share invite link! Once opened, they join as your opponent.',
+                });
+              } else {
+                setMultiplayerStatus('connected');
+                if (msg.opponentColor) {
+                  setOpponentPaddleColor(msg.opponentColor);
+                  gs.opponentPaddleColor = msg.opponentColor;
+                }
+              }
+              break;
+            }
+
+            case 'opponent_joined': {
+              setMultiplayerStatus('connected');
+              if (msg.opponentColor) {
+                setOpponentPaddleColor(msg.opponentColor);
+                gs.opponentPaddleColor = msg.opponentColor;
+              }
+              sound.victory();
+              addFloatText('OPPONENT JOINED! 🏓', CANVAS_W / 2, 280, '#4ade80');
+              break;
+            }
+
+            case 'match_ready': {
+              setMultiplayerStatus('connected');
+              if (msg.p1Color && msg.p2Color) {
+                const oppColor = gs.multiplayerRole === 'p1' ? msg.p2Color : msg.p1Color;
+                setOpponentPaddleColor(oppColor);
+                gs.opponentPaddleColor = oppColor;
+              }
+
+              const isMyServe =
+                (gs.multiplayerRole === 'p1' && msg.serverRole === 'p1') ||
+                (gs.multiplayerRole === 'p2' && msg.serverRole === 'p2');
+              const nextServer = isMyServe ? 'player' : 'cpu';
+
+              gs.playerScore = 0;
+              gs.cpuScore = 0;
+              gs.rallyCount = 0;
+              gs.gameOver = null;
+              setPlayerScore(0);
+              setCpuScore(0);
+              setRallyCount(0);
+              setGameOver(null);
+
+              resetServe(
+                nextServer,
+                'Match Ready! 🏓',
+                isMyServe ? 'Your Serve! Click or Tap to Serve' : 'Waiting for Friend to Serve...'
+              );
+              break;
+            }
+
+            case 'opponent_paddle': {
+              gs.aiLateral = msg.lateral;
+              gs.aiDepth = msg.depth;
+              gs.aiVx = msg.paddleVx;
+              gs.aiTilt = msg.paddleTilt;
+              break;
+            }
+
+            case 'ball_hit': {
+              const incomingBall = msg.ball;
+              if (!gs.ball) {
+                gs.ball = createBall('cpu');
+              }
+              gs.ball.depth = incomingBall.depth;
+              gs.ball.lateral = incomingBall.lateral;
+              gs.ball.z = incomingBall.z;
+              gs.ball.vDepth = incomingBall.vDepth;
+              gs.ball.vLateral = incomingBall.vLateral;
+              gs.ball.vz = incomingBall.vz;
+              gs.ball.spinLateral = incomingBall.spinLateral;
+              gs.ball.smash = incomingBall.smash;
+              gs.ball.tableBounces = 0;
+              gs.ball.lastHitter = 'cpu';
+
+              sound.paddleHit(incomingBall.smash ? 1.6 : 1.2);
+              const pos = worldToScreen(gs.ball.depth, gs.ball.lateral);
+              spawnHitSparks(
+                pos.x,
+                pos.y - gs.ball.z,
+                incomingBall.smash ? 24 : 14,
+                PADDLE_COLOR_CONFIG[gs.opponentPaddleColor]?.mid || '#38bdf8'
+              );
+              if (incomingBall.smash) {
+                sound.whoosh();
+                addCameraShake(3);
+                addFloatText('OPPONENT DRIVE! ⚡', pos.x, pos.y - gs.ball.z - 25, '#fb923c');
+              }
+
+              gs.rallyCount++;
+              setRallyCount(gs.rallyCount);
+              if (gs.rallyCount > gs.bestRally) {
+                gs.bestRally = gs.rallyCount;
+                setBestRally(gs.bestRally);
+              }
+              break;
+            }
+
+            case 'serve': {
+              const incomingBall = msg.ball;
+              if (!gs.ball) {
+                gs.ball = createBall('cpu');
+              }
+              gs.ball.depth = incomingBall.depth;
+              gs.ball.lateral = incomingBall.lateral;
+              gs.ball.z = incomingBall.z;
+              gs.ball.vDepth = incomingBall.vDepth;
+              gs.ball.vLateral = incomingBall.vLateral;
+              gs.ball.vz = incomingBall.vz;
+              gs.ball.spinLateral = incomingBall.spinLateral;
+              gs.ball.smash = incomingBall.smash;
+              gs.ball.tableBounces = 0;
+              gs.ball.lastHitter = 'cpu';
+              gs.serving = false;
+              setServing(false);
+              setBannerMessage(null);
+
+              sound.paddleHit(incomingBall.smash ? 1.6 : 1.2);
+              const pos = worldToScreen(gs.ball.depth, gs.ball.lateral);
+              spawnHitSparks(
+                pos.x,
+                pos.y - gs.ball.z,
+                incomingBall.smash ? 24 : 14,
+                PADDLE_COLOR_CONFIG[gs.opponentPaddleColor]?.mid || '#38bdf8'
+              );
+              if (incomingBall.smash) {
+                sound.whoosh();
+                addCameraShake(3);
+                addFloatText('FAST SERVE! ⚡', pos.x, pos.y - gs.ball.z - 25, '#38bdf8');
+              }
+              break;
+            }
+
+            case 'score_update': {
+              const isP1 = gs.multiplayerRole === 'p1';
+              const newPlayerScore = isP1 ? msg.p1Score : msg.p2Score;
+              const newCpuScore = isP1 ? msg.p2Score : msg.p1Score;
+
+              gs.playerScore = newPlayerScore;
+              gs.cpuScore = newCpuScore;
+              setPlayerScore(newPlayerScore);
+              setCpuScore(newCpuScore);
+
+              const isPlayerPoint = isP1 ? msg.pointWinnerRole === 'p1' : msg.pointWinnerRole === 'p2';
+              sound.pointScore(isPlayerPoint);
+              addCameraShake(8);
+
+              const nextServerIsPlayer = isP1 ? msg.serverRole === 'p1' : msg.serverRole === 'p2';
+              const nextServer = nextServerIsPlayer ? 'player' : 'cpu';
+              gs.server = nextServer;
+              setServer(nextServer);
+
+              if (msg.matchWinner) {
+                const isPlayerWin = isP1 ? msg.matchWinner === 'p1' : msg.matchWinner === 'p2';
+                gs.gameOver = isPlayerWin ? 'player' : 'cpu';
+                setGameOver(gs.gameOver);
+                if (isPlayerWin) sound.victory();
+                else sound.defeat();
+              } else {
+                resetServe(
+                  nextServer,
+                  isPlayerPoint ? 'Point for You! 🏓' : 'Friend Scored! 🏓',
+                  nextServer === 'player' ? 'Your Serve! Click or Tap to Serve' : 'Waiting for Friend to Serve...'
+                );
+              }
+              break;
+            }
+
+            case 'match_restarted': {
+              const isP1 = gs.multiplayerRole === 'p1';
+              const nextServerIsPlayer = isP1 ? msg.serverRole === 'p1' : msg.serverRole === 'p2';
+              const nextServer = nextServerIsPlayer ? 'player' : 'cpu';
+
+              gs.playerScore = 0;
+              gs.cpuScore = 0;
+              gs.rallyCount = 0;
+              gs.gameOver = null;
+              setPlayerScore(0);
+              setCpuScore(0);
+              setRallyCount(0);
+              setGameOver(null);
+
+              resetServe(
+                nextServer,
+                'Match Restarted! 🏓',
+                nextServer === 'player' ? 'Your Serve! Click or Tap to Serve' : 'Waiting for Friend to Serve...'
+              );
+              break;
+            }
+
+            case 'opponent_disconnected': {
+              setMultiplayerStatus('disconnected');
+              setBannerMessage({
+                text: 'Friend Disconnected',
+                sub: 'Waiting for opponent to reconnect or share link again',
+              });
+              break;
+            }
+
+            case 'room_full': {
+              setMultiplayerStatus('disconnected');
+              setBannerMessage({
+                text: 'Room is Full',
+                sub: 'This match room already has two active players.',
+              });
+              break;
+            }
+          }
+        } catch (e) {
+          console.error('Error handling WebSocket message:', e);
+        }
+      };
+
+      ws.onclose = () => {
+        setMultiplayerStatus((prev) => (prev === 'connected' ? 'disconnected' : prev));
+      };
+    },
+    [addCameraShake, addFloatText, createBall, resetServe, spawnHitSparks, worldToScreen]
+  );
+
+  // Switch between Solo vs CPU and Play with Friend
+  const switchToFriendMode = useCallback(
+    (customRoomId?: string) => {
+      const gs = gameStateRef.current;
+      gs.gameMode = 'friend';
+      setGameMode('friend');
+
+      const roomId = customRoomId || `pong-${Math.random().toString(36).substring(2, 8)}`;
+      setFriendRoomId(roomId);
+
+      // Update URL search query without full reload
+      if (typeof window !== 'undefined') {
+        const newUrl = `${window.location.pathname}?room=${roomId}`;
+        window.history.replaceState({ path: newUrl }, '', newUrl);
+      }
+
+      connectMultiplayer(roomId, gs.playerPaddleColor);
+    },
+    [connectMultiplayer]
+  );
+
+  const switchToCpuMode = useCallback(() => {
+    if (wsRef.current) {
+      try {
+        wsRef.current.close();
+      } catch (_) {}
+      wsRef.current = null;
+    }
+
+    const gs = gameStateRef.current;
+    gs.gameMode = 'cpu';
+    gs.multiplayerRole = null;
+    setGameMode('cpu');
+    setFriendRoomId(null);
+    setMultiplayerStatus('idle');
+    setMultiplayerRole(null);
+
+    // Clean URL query
+    if (typeof window !== 'undefined') {
+      window.history.replaceState({ path: window.location.pathname }, '', window.location.pathname);
+    }
+
+    gs.playerScore = 0;
+    gs.cpuScore = 0;
+    gs.rallyCount = 0;
+    gs.gameOver = null;
+    setPlayerScore(0);
+    setCpuScore(0);
+    setRallyCount(0);
+    setGameOver(null);
+
     resetServe('player', 'Ping Pong 3D', 'Click or Tap to Serve (Move bat for Fast Serve ⚡)');
   }, [resetServe]);
+
+  // Copy Invite Link to Clipboard
+  const copyInviteLink = useCallback(() => {
+    if (!friendRoomId) return;
+    const url = `${window.location.origin}${window.location.pathname}?room=${friendRoomId}`;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(() => {
+        setCopiedLink(true);
+        setTimeout(() => setCopiedLink(false), 2400);
+      }).catch(() => {
+        // Fallback prompt
+        window.prompt('Copy invite link:', url);
+      });
+    } else {
+      window.prompt('Copy invite link:', url);
+    }
+  }, [friendRoomId]);
+
+  // Web Share API support
+  const shareInviteLink = useCallback(() => {
+    if (!friendRoomId) return;
+    const url = `${window.location.origin}${window.location.pathname}?room=${friendRoomId}`;
+    if (navigator.share) {
+      navigator.share({
+        title: 'Play Ping Pong 3D with me!',
+        text: 'Join my 3D Ping Pong match! Click to play right in your browser:',
+        url,
+      }).catch(() => {});
+    } else {
+      copyInviteLink();
+    }
+  }, [copyInviteLink, friendRoomId]);
+
+  // On initial mount: check if opening via invite link (?room=...)
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const urlParams = new URLSearchParams(window.location.search);
+      const roomParam = urlParams.get('room');
+      if (roomParam) {
+        switchToFriendMode(roomParam);
+        return;
+      }
+    }
+    // Default solo serve
+    resetServe('player', 'Ping Pong 3D', 'Click or Tap to Serve (Move bat for Fast Serve ⚡)');
+  }, [resetServe, switchToFriendMode]);
 
   // Spacebar and Enter to serve or hit
   useEffect(() => {
@@ -860,6 +1304,7 @@ export default function App() {
     // AI logic update
     const updateAI = () => {
       const gs = gameStateRef.current;
+      if (gs.gameMode !== 'cpu') return;
       if (!gs.ball) return;
 
       const diff = gs.difficulty;
@@ -1123,6 +1568,25 @@ export default function App() {
             ball.tableBounces = 0;
             ball.lastHitter = 'player';
 
+            // Relay hit in Friend multiplayer mode
+            if (gs.gameMode === 'friend' && wsRef.current?.readyState === WebSocket.OPEN) {
+              wsRef.current.send(
+                JSON.stringify({
+                  type: 'ball_hit',
+                  ball: {
+                    depth: ball.depth,
+                    lateral: ball.lateral,
+                    z: ball.z,
+                    vDepth: ball.vDepth,
+                    vLateral: ball.vLateral,
+                    vz: ball.vz,
+                    spinLateral: ball.spinLateral,
+                    smash: ball.smash,
+                  },
+                })
+              );
+            }
+
             const pos = worldToScreen(ball.depth, ball.lateral);
             const isHighSpeed = targetSpeed > 0.020;
             ball.smash = isHighSpeed;
@@ -1182,8 +1646,8 @@ export default function App() {
         }
       }
 
-      // 4. CPU Hit Zone Collision
-      if (ball.vDepth < 0 && ball.depth <= AI_HIT_DEPTH) {
+      // 4. CPU Hit Zone Collision (Only in Solo vs CPU mode)
+      if (gs.gameMode === 'cpu' && ball.vDepth < 0 && ball.depth <= AI_HIT_DEPTH) {
         const offset = ball.lateral - gs.aiLateral;
         if (Math.abs(offset) < paddleHalfW + 0.09 && ball.z < 65) {
           // Successful CPU Return with relaxed, controllable speed
@@ -1623,6 +2087,12 @@ export default function App() {
         rubberGrad.addColorStop(0, colorCfg.light);
         rubberGrad.addColorStop(0.55, colorCfg.mid);
         rubberGrad.addColorStop(1, colorCfg.dark);
+      } else if (gs.gameMode === 'friend') {
+        const colorKey = gs.opponentPaddleColor || opponentPaddleColor || 'blue';
+        const colorCfg = PADDLE_COLOR_CONFIG[colorKey] || PADDLE_COLOR_CONFIG.blue;
+        rubberGrad.addColorStop(0, colorCfg.light);
+        rubberGrad.addColorStop(0.55, colorCfg.mid);
+        rubberGrad.addColorStop(1, colorCfg.dark);
       } else {
         // In reference image, CPU paddle has attractive vibrant sky-blue rubber!
         rubberGrad.addColorStop(0, '#38bdf8');
@@ -1888,8 +2358,8 @@ export default function App() {
       // Draw World
       drawTable();
 
-      // Draw CPU Paddle (Far, depth ~0.06)
-      drawPaddle(gs.aiLateral, 0.05, false, gs.aiTilt);
+      // Draw CPU or Friend Paddle (Far, depth ~0.06)
+      drawPaddle(gs.aiLateral, gs.aiDepth || 0.05, false, gs.aiTilt);
 
       // Draw Ball & Player Paddle with 3D depth-sorting (paddle can be near net or baseline)
       if (gs.ball && gs.paddleDepth < gs.ball.depth) {
@@ -2025,30 +2495,62 @@ export default function App() {
           </div>
         </div>
 
-        {/* CPU Side */}
+        {/* CPU or Friend Opponent Side */}
         <div
           id="scoreboard-cpu-container"
           key={`cpu-score-container-${cpuScore}`}
           className={`flex items-center gap-3 ${cpuScore > 0 ? 'animate-container-shake' : ''}`}
         >
           <div id="scoreboard-cpu-score-box" className="flex flex-col items-end">
-            <span className="text-xs uppercase tracking-wider text-rose-400 font-semibold">CPU</span>
+            <span
+              className={`text-xs uppercase tracking-wider font-semibold flex items-center gap-1.5 ${
+                gameMode === 'friend' ? 'text-sky-300' : 'text-rose-400'
+              }`}
+            >
+              <span>{gameMode === 'friend' ? 'Friend' : 'CPU'}</span>
+              {gameMode === 'friend' && (
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    multiplayerStatus === 'connected'
+                      ? 'bg-emerald-400 animate-pulse'
+                      : multiplayerStatus === 'connecting'
+                      ? 'bg-amber-400 animate-ping'
+                      : 'bg-amber-400'
+                  }`}
+                  title={multiplayerStatus === 'connected' ? 'Friend Connected' : 'Waiting for Opponent'}
+                />
+              )}
+            </span>
             <span
               id="scoreboard-cpu-score"
               key={`cpu-score-${cpuScore}`}
               className={`text-3xl font-black tabular-nums leading-none drop-shadow origin-right inline-block transition-colors ${
-                cpuScore > 0 ? 'animate-score-zoom-cpu text-rose-400' : 'text-white'
+                cpuScore > 0
+                  ? gameMode === 'friend'
+                    ? 'animate-score-zoom-cpu text-sky-400'
+                    : 'animate-score-zoom-cpu text-rose-400'
+                  : 'text-white'
               }`}
             >
               {cpuScore}
             </span>
           </div>
           <div className="relative">
-            <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-rose-500 to-red-800 flex items-center justify-center text-white font-bold shadow-lg shadow-rose-900/40">
-              CPU
+            <div
+              className={`w-11 h-11 rounded-xl flex items-center justify-center text-white font-bold shadow-lg ${
+                gameMode === 'friend'
+                  ? PADDLE_COLOR_CONFIG[opponentPaddleColor]?.avatarClass ||
+                    'bg-gradient-to-br from-sky-500 to-blue-800 shadow-sky-900/40'
+                  : 'bg-gradient-to-br from-rose-500 to-red-800 shadow-rose-900/40'
+              }`}
+            >
+              {gameMode === 'friend' ? 'OPP' : 'CPU'}
             </div>
             {server === 'cpu' && (
-              <span className="absolute -top-1 -left-1 w-4 h-4 rounded-full bg-amber-400 border-2 border-slate-900 animate-pulse" title="Serving" />
+              <span
+                className="absolute -top-1 -left-1 w-4 h-4 rounded-full bg-amber-400 border-2 border-slate-900 animate-pulse"
+                title="Serving"
+              />
             )}
           </div>
         </div>
@@ -2067,38 +2569,110 @@ export default function App() {
             id="btn-restart-game"
             onClick={startNewMatch}
             className="p-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 transition"
-            title="Restart Match (Rolls new random paddle color)"
+            title={gameMode === 'friend' ? 'Restart / Rematch' : 'Restart Match (Rolls new random paddle color)'}
           >
             <RotateCcw className="w-4 h-4" />
           </button>
         </div>
       </div>
 
-      {/* Settings Chips (Difficulty & Random Match Paddle Color) */}
-      <div className="absolute top-20 left-1/2 -translate-x-1/2 z-20 flex items-center gap-3 px-3.5 py-1.5 rounded-xl bg-slate-900/50 backdrop-blur-md border border-white/10 text-xs shadow-lg">
-        <div className="flex items-center gap-1.5">
-          <span className="text-slate-400 mr-1 font-medium">Difficulty:</span>
-          {(['casual', 'pro', 'master'] as Difficulty[]).map((d) => (
-            <button
-              key={d}
-              onClick={() => setDifficultyMode(d)}
-              className={`px-2.5 py-0.5 rounded-lg capitalize font-medium transition ${
-                difficulty === d
-                  ? 'bg-emerald-500 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-white hover:bg-white/5'
-              }`}
-            >
-              {d}
-            </button>
-          ))}
+      {/* Mode & Settings Bar */}
+      <div className="absolute top-20 left-1/2 -translate-x-1/2 z-20 flex flex-wrap items-center justify-center gap-2.5 px-3.5 py-1.5 rounded-2xl bg-slate-900/60 backdrop-blur-md border border-white/10 text-xs shadow-xl max-w-[95vw]">
+        {/* Game Mode Selector: Solo vs CPU / Play with Friend */}
+        <div className="flex items-center bg-black/40 p-0.5 rounded-xl border border-white/10">
+          <button
+            id="btn-mode-cpu"
+            onClick={switchToCpuMode}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-bold text-xs transition ${
+              gameMode === 'cpu'
+                ? 'bg-emerald-500 text-white shadow-sm'
+                : 'text-slate-400 hover:text-white hover:bg-white/5'
+            }`}
+          >
+            <Bot className="w-3.5 h-3.5" />
+            <span>vs CPU</span>
+          </button>
+          <button
+            id="btn-mode-friend"
+            onClick={() => switchToFriendMode()}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-bold text-xs transition ${
+              gameMode === 'friend'
+                ? 'bg-gradient-to-r from-purple-500 to-indigo-600 text-white shadow-sm'
+                : 'text-slate-400 hover:text-white hover:bg-white/5'
+            }`}
+          >
+            <Users className="w-3.5 h-3.5" />
+            <span>With Friend</span>
+            {gameMode === 'friend' && multiplayerStatus === 'connected' && (
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            )}
+          </button>
         </div>
 
-        <div className="h-3.5 w-px bg-white/15" />
+        <div className="h-4 w-px bg-white/15" />
 
+        {/* Difficulty (Solo Mode only) */}
+        {gameMode === 'cpu' && (
+          <div className="flex items-center gap-1.5">
+            <span className="text-slate-400 mr-0.5 font-medium">Difficulty:</span>
+            {(['casual', 'pro', 'master'] as Difficulty[]).map((d) => (
+              <button
+                key={d}
+                onClick={() => setDifficultyMode(d)}
+                className={`px-2 py-0.5 rounded-lg capitalize font-medium transition ${
+                  difficulty === d
+                    ? 'bg-emerald-500 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-white hover:bg-white/5'
+                }`}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Multiplayer Controls (Friend Mode) */}
+        {gameMode === 'friend' && (
+          <div className="flex items-center gap-2">
+            <button
+              id="btn-copy-link-chip"
+              onClick={copyInviteLink}
+              className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded-lg font-semibold transition ${
+                copiedLink
+                  ? 'bg-emerald-500 text-white'
+                  : 'bg-white/10 hover:bg-white/20 text-slate-200 border border-white/15'
+              }`}
+              title="Copy friend invite link"
+            >
+              {copiedLink ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+              <span>{copiedLink ? 'Link Copied!' : 'Copy Invite Link'}</span>
+            </button>
+
+            <button
+              id="btn-share-link-chip"
+              onClick={shareInviteLink}
+              className="p-1 rounded-lg bg-white/10 hover:bg-white/20 text-slate-200 transition border border-white/15"
+              title="Share Link"
+            >
+              <Share2 className="w-3.5 h-3.5" />
+            </button>
+
+            <button
+              onClick={() => setShowInviteModal((v) => !v)}
+              className="text-xs text-indigo-300 hover:text-indigo-200 underline decoration-indigo-400/40"
+            >
+              {showInviteModal ? 'Hide Link' : 'Show Link'}
+            </button>
+          </div>
+        )}
+
+        <div className="h-4 w-px bg-white/15" />
+
+        {/* Bat Color Selector */}
         <div className="flex items-center gap-1.5">
           <span className="text-slate-400 font-medium flex items-center gap-1">
             <Palette className="w-3.5 h-3.5 text-slate-400" />
-            Bat Color:
+            Bat:
           </span>
           {PADDLE_COLOR_OPTIONS.map((c) => (
             <button
@@ -2108,7 +2682,7 @@ export default function App() {
                 setPlayerPaddleColor(c);
               }}
               title={`Switch to ${PADDLE_COLOR_CONFIG[c].name}`}
-              className={`flex items-center gap-1.5 px-2 py-0.5 rounded-lg capitalize font-medium transition ${
+              className={`flex items-center gap-1 px-1.5 py-0.5 rounded-lg capitalize font-medium transition ${
                 playerPaddleColor === c
                   ? 'bg-white/15 text-white border border-white/20 shadow-sm'
                   : 'text-slate-400 hover:text-white hover:bg-white/5'
@@ -2120,6 +2694,99 @@ export default function App() {
           ))}
         </div>
       </div>
+
+      {/* Floating Invite Card in Friend Mode (when waiting or when user clicks 'Show Link') */}
+      {gameMode === 'friend' && (multiplayerStatus !== 'connected' || showInviteModal) && (
+        <div
+          id="friend-invite-card"
+          className="absolute top-32 left-1/2 -translate-x-1/2 z-30 w-[92%] max-w-md p-5 rounded-3xl bg-slate-900/95 backdrop-blur-2xl border border-white/20 shadow-[0_20px_60px_rgba(0,0,0,0.8)] text-white animate-in fade-in zoom-in-95 duration-200"
+        >
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-xl bg-purple-500/20 border border-purple-500/40 flex items-center justify-center text-purple-300">
+                <Users className="w-4 h-4" />
+              </div>
+              <div>
+                <h3 className="font-bold text-sm leading-tight text-white">Play with Friend (1v1)</h3>
+                <span className="text-[11px] text-slate-400">Real-time online multiplayer</span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              <span
+                className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold ${
+                  multiplayerStatus === 'connected'
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                    : multiplayerStatus === 'connecting'
+                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                    : 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
+                }`}
+              >
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    multiplayerStatus === 'connected' ? 'bg-emerald-400' : 'bg-amber-400 animate-pulse'
+                  }`}
+                />
+                {multiplayerStatus === 'connected' ? 'Opponent Ready' : 'Waiting for Opponent...'}
+              </span>
+            </div>
+          </div>
+
+          <p className="text-xs text-slate-300 mb-3.5 leading-relaxed">
+            Send this invite link to your friend. Whoever opens the link will instantly join this match as your opponent!
+          </p>
+
+          <div className="flex items-center gap-2 p-1.5 rounded-2xl bg-black/60 border border-white/10 mb-3.5">
+            <div className="flex-1 px-3 py-1 text-xs text-slate-300 font-mono truncate select-all">
+              {typeof window !== 'undefined'
+                ? `${window.location.origin}${window.location.pathname}?room=${friendRoomId || ''}`
+                : ''}
+            </div>
+            <button
+              id="btn-copy-link-modal"
+              onClick={copyInviteLink}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition active:scale-95 ${
+                copiedLink
+                  ? 'bg-emerald-500 text-white'
+                  : 'bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white shadow-md'
+              }`}
+            >
+              {copiedLink ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+              <span>{copiedLink ? 'Copied!' : 'Copy Link'}</span>
+            </button>
+            <button
+              onClick={shareInviteLink}
+              className="p-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-slate-200 transition"
+              title="Share Link via Apps"
+            >
+              <Share2 className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="flex items-center justify-between text-xs text-slate-400 pt-3 border-t border-white/10">
+            <span className="flex items-center gap-1 font-mono">
+              <span>Room:</span>
+              <strong className="text-white">{friendRoomId}</strong>
+            </span>
+            <div className="flex items-center gap-3">
+              {multiplayerStatus === 'connected' && (
+                <button
+                  onClick={() => setShowInviteModal(false)}
+                  className="text-emerald-400 hover:text-emerald-300 font-semibold"
+                >
+                  Resume Match
+                </button>
+              )}
+              <button
+                onClick={switchToCpuMode}
+                className="text-slate-400 hover:text-white underline decoration-slate-600 transition"
+              >
+                Switch to Solo vs CPU
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Main Canvas Stage */}
       <div
@@ -2183,7 +2850,11 @@ export default function App() {
               </h2>
               <p className="text-sm text-slate-300 mb-6">
                 {gameOver === 'player'
-                  ? 'Sensational table tennis mastery! You crushed the CPU.'
+                  ? gameMode === 'friend'
+                    ? 'Sensational table tennis mastery! You defeated your friend in 3D Ping Pong!'
+                    : 'Sensational table tennis mastery! You crushed the CPU.'
+                  : gameMode === 'friend'
+                  ? 'Your friend took the match! Demand a rematch and claim victory!'
                   : 'The CPU took the match. Practice your curve spin and strike back!'}
               </p>
 
@@ -2209,7 +2880,7 @@ export default function App() {
                 className="w-full py-3.5 px-6 rounded-xl font-bold text-white bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 active:scale-95 transition shadow-lg shadow-emerald-900/40 flex items-center justify-center gap-2"
               >
                 <Award className="w-5 h-5" />
-                Play Next Match
+                {gameMode === 'friend' ? 'Rematch Friend' : 'Play Next Match'}
               </button>
             </div>
           </div>
@@ -2218,11 +2889,11 @@ export default function App() {
 
       {/* Bottom Controls Info Banner */}
       <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20 text-[12px] text-slate-400 pointer-events-none flex items-center gap-4 bg-slate-900/50 backdrop-blur-sm px-4 py-1.5 rounded-full border border-white/5 whitespace-nowrap">
-        <span>Random Match Paddle Colors (Blue, Green, Purple)</span>
+        <span>{gameMode === 'friend' ? '👥 Friend Online Match' : '🤖 Solo vs CPU'}</span>
         <span>•</span>
         <span>Free Bat Movement</span>
         <span>•</span>
-        <span>Swipe Fast: Curve & Spin</span>
+        <span>Swipe Fast: Directional Curve & Spin</span>
       </div>
     </div>
   );

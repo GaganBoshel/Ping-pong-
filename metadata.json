@@ -1,6 +1,6 @@
 {
   "name": "Ping Pong 3D",
-  "description": "3D perspective table tennis game with realistic ball spin, dynamic lighting, particles, sound synthesizer, and glassmorphism HUD.",
+  "description": "3D perspective table tennis game with Solo vs CPU and real-time online multiplayer against friends via shareable invite links, with realistic physics and 3D audio.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
