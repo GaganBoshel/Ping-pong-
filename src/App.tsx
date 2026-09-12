@@ -412,6 +412,7 @@ export default function App() {
     paddleVy: 0,
     aiLateral: 0,
     aiVx: 0,
+    swingVx: 0,
 
     // Fast strike & stroke speed tracking
     recentStrikeSpeed: 0,
@@ -733,7 +734,13 @@ export default function App() {
 
     gs.prevPaddleLateral = gs.paddleLateral;
     gs.paddleLateral = lateral;
-    gs.paddleVx = (gs.paddleLateral - gs.prevPaddleLateral);
+    const deltaLateral = gs.paddleLateral - gs.prevPaddleLateral;
+    gs.paddleVx = deltaLateral;
+
+    // Track active swing direction (Swing Left = negative, Swing Right = positive)
+    if (Math.abs(deltaLateral) > 0.001) {
+      gs.swingVx = deltaLateral * 0.75 + (gs.swingVx || 0) * 0.25;
+    }
 
     // Track stroke velocity and stroke travel distance
     const latSpeed = Math.abs(gs.paddleVx);
@@ -778,7 +785,21 @@ export default function App() {
         : 0.0125;
 
       gs.ball.vDepth = -serveSpeed;
-      gs.ball.vLateral = gs.paddleLateral * -0.005 + (gs.paddleVx || 0) * 0.35;
+
+      // Active serve swing direction: Swing Left -> ball serves Left, Swing Right -> ball serves Right
+      const activeServeSwing = Math.abs(gs.paddleVx) > Math.abs(gs.swingVx || 0)
+        ? gs.paddleVx
+        : (gs.swingVx || 0);
+
+      if (Math.abs(activeServeSwing) > 0.002) {
+        const serveSign = Math.sign(activeServeSwing);
+        gs.ball.vLateral = serveSign * Math.min(0.020, Math.max(0.006, Math.abs(activeServeSwing) * 1.15));
+        gs.ball.spinLateral = Math.max(-2.5, Math.min(2.5, activeServeSwing * 60));
+      } else {
+        gs.ball.vLateral = (gs.paddleLateral || 0) * -0.004;
+        gs.ball.spinLateral = 0;
+      }
+
       gs.ball.vz = isFastServe ? 2.5 : 3.6;
       gs.ball.tableBounces = 0;
       gs.ball.lastHitter = 'player';
@@ -886,6 +907,7 @@ export default function App() {
       // Update paddle tilt with smooth spring interpolation
       gs.paddleTilt += (gs.paddleVx * 15 - gs.paddleTilt) * 0.2;
       gs.paddleVx *= 0.80;
+      gs.swingVx = (gs.swingVx || 0) * 0.92;
       gs.paddleVy = (gs.paddleVy || 0) * 0.80;
       gs.recentStrikeSpeed = (gs.recentStrikeSpeed || 0) * 0.90;
       gs.strokeDistance = (gs.strokeDistance || 0) * 0.88;
@@ -1064,10 +1086,40 @@ export default function App() {
             targetSpeed = Math.min(0.038, targetSpeed);
 
             ball.vDepth = -targetSpeed;
-            // Impart lateral angle based on contact point & paddle velocity
-            ball.vLateral = offset * 0.034 + gs.paddleVx * 0.55;
-            // Impart Magnus curve spin based on paddle swipe speed
-            ball.spinLateral = Math.max(-2.8, Math.min(2.8, gs.paddleVx * 50 + offset * 1.4));
+
+            // Directional swing control: Ball faithfully goes to the side you swing the bat!
+            // Swing Left (< 0) -> Ball goes to Left side of table
+            // Swing Right (> 0) -> Ball goes to Right side of table
+            const activeSwing = Math.abs(gs.paddleVx) > Math.abs(gs.swingVx || 0)
+              ? gs.paddleVx
+              : (gs.swingVx || 0);
+
+            let swingDirLateral = 0;
+            if (Math.abs(activeSwing) > 0.0018) {
+              const swingSign = Math.sign(activeSwing);
+              const swingPower = Math.min(0.024, Math.abs(activeSwing) * 1.25);
+              // Base directional force directly matching the swing direction
+              swingDirLateral = swingSign * Math.max(0.006, swingPower);
+              // Subtle contact offset nuance (aiming with outer bat edge widens the angle)
+              swingDirLateral += offset * 0.010;
+              // Guarantee the ball strictly travels toward the side the bat was swung
+              if (Math.abs(activeSwing) > 0.004) {
+                swingDirLateral = swingSign * Math.max(0.008, Math.abs(swingDirLateral));
+              }
+            } else {
+              // Stationary bat / gentle block hit: direct based on contact point offset
+              swingDirLateral = offset * 0.035;
+            }
+
+            // Keep within table boundaries to ensure thrilling, playable rallies
+            ball.vLateral = Math.max(-0.026, Math.min(0.026, swingDirLateral));
+
+            // Impart Magnus curve spin in the direction of the swing
+            const spinAmount = Math.abs(activeSwing) > 0.0018
+              ? activeSwing * 75
+              : offset * 1.5;
+            ball.spinLateral = Math.max(-3.0, Math.min(3.0, spinAmount));
+
             ball.tableBounces = 0;
             ball.lastHitter = 'player';
 
@@ -2146,8 +2198,8 @@ export default function App() {
                   <div className="text-lg font-black text-amber-400">{bestRally} hits</div>
                 </div>
                 <div>
-                  <div className="text-xs text-slate-400 font-semibold uppercase">Smashes</div>
-                  <div className="text-lg font-black text-rose-400">{totalSmashes}</div>
+                  <div className="text-xs text-slate-400 font-semibold uppercase">Fast Hits</div>
+                  <div className="text-lg font-black text-sky-400">{totalFastHits}</div>
                 </div>
               </div>
 
